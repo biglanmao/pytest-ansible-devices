@@ -15,7 +15,6 @@ import pytest
 from .fixture import (  # noqa: F401
     ansible_inventory,
     device_inventory_path,
-    device_manager,
     device_private_data_dir,
 )
 
