@@ -1,0 +1,7 @@
+---
+- name: demo playbook
+  hosts: all
+  gather_facts: false
+  tasks:
+    - name: run lscpu via playbook
+      command: lscpu

@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pytest-ansible-devices" # PyPI 上的项目名，用连字符是标准做法
+version = "0.1.0"
+description = "设备管理基础框架（pytest 插件）：基于 ansible-runner + InventoryManager"
+requires-python = ">=3.10"
+dependencies = [
+    "ansible-runner>=2.4",
+    "ansible-core>=2.16",
+    "pytest>=7",
+]
+
+[project.entry-points.pytest11]
+pytest_ansible_devices = "pytest_ansible_devices.plugin" 
+
+[tool.setuptools]
+packages = ["pytest_ansible_devices"]
