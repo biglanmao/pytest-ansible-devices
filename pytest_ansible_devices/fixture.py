@@ -2,9 +2,6 @@
 
 import pytest
 
-from .device import AnsibleDeviceManager
-
-
 @pytest.fixture(scope="session")
 def device_inventory_path(request):
     """``--device-inventory`` 指定的清单文件路径。"""
