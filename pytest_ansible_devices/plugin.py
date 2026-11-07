@@ -2,7 +2,7 @@
 
 - ansible-runner 初始化：``pytest_configure`` 确保 ansible CLI 在 PATH。
 - ansible-core 初始化：``ansible_inventory`` fixture（InventoryManager 加载清单）。
-- 上层使用：直接 ``import ansible_runner``（接口本就是公开的，无需再封装）。
+- 设备层：``device_manager`` fixture（清单驱动的设备管理器）。
 - kw 层生命周期：``runner_context``。
 """
 
@@ -10,6 +10,14 @@ import os
 import sys
 
 import pytest
+
+# 导入即注册 fixture（pytest 会收集插件模块上的 fixture 属性）。
+from .fixture import (  # noqa: F401
+    ansible_inventory,
+    device_inventory_path,
+    device_manager,
+    device_private_data_dir,
+)
 
 
 def pytest_addoption(parser):
@@ -19,6 +27,12 @@ def pytest_addoption(parser):
         action="store",
         default=None,
         help="Ansible 清单文件路径（ansible-core InventoryManager 加载）",
+    )
+    group.addoption(
+        "--device-private-data-dir",
+        action="store",
+        default=None,
+        help="ansible-runner 工作目录；为空时每次执行使用临时目录",
     )
 
 
@@ -31,6 +45,3 @@ def _ensure_ansible_path() -> None:
 
 def pytest_configure(config):
     _ensure_ansible_path()
-
-
-
