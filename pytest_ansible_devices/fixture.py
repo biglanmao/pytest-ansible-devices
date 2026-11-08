@@ -12,7 +12,7 @@ def device_inventory_path(request):
 
 
 @pytest.fixture(scope="session")
-def ansible_inventory(device_inventory_path):
+def device_inventory(device_inventory_path):
     """ansible-core 初始化：InventoryManager 加载清单（进程内清单对象）。"""
     from ansible.inventory.manager import InventoryManager
     from ansible.parsing.dataloader import DataLoader

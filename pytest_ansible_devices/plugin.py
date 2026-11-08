@@ -13,7 +13,7 @@ import pytest
 
 # 导入即注册 fixture（pytest 会收集插件模块上的 fixture 属性）。
 from .fixture import (  # noqa: F401
-    ansible_inventory,
+    device_inventory,
     device_inventory_path,
     device_private_data_dir,
 )
@@ -25,13 +25,13 @@ def pytest_addoption(parser):
         "--device-inventory",
         action="store",
         default=None,
-        help="Ansible 清单文件路径（ansible-core InventoryManager 加载）",
+        help="清单文件路径",
     )
     group.addoption(
         "--device-private-data-dir",
         action="store",
         default=None,
-        help="ansible-runner 工作目录；为空时每次执行使用临时目录",
+        help="devices-runner 工作目录；为空时每次执行使用临时目录",
     )
 
 
