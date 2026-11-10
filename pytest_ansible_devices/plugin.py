@@ -21,7 +21,13 @@ def pytest_addoption(parser):
         "--device-inventory",
         action="store",
         default=None,
-        help="清单文件路径（相对路径基于 pytest rootdir）",
+        help="清单文件或目录（相对路径基于 pytest rootdir）",
+    )
+    parser.addini(
+        "device_inventory",
+        "清单文件或目录；相对路径基于 pytest rootdir；"
+        "未配置时使用 <rootdir>/etc/devices/inventory",
+        default="",
     )
 
 

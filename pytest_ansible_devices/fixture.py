@@ -4,28 +4,47 @@ from pathlib import Path
 
 import pytest
 
+DEFAULT_INVENTORY = "etc/devices/inventory"
 
-def _resolve_path(raw: str, rootdir: Path) -> Path:
-    """把命令行路径解析为绝对 ``Path``；相对路径以 pytest rootdir 为基准。"""
+
+def _resolve_path(raw, rootdir: Path) -> Path:
+    """把命令行/配置路径解析为绝对 ``Path``；相对路径以 pytest rootdir 为基准。"""
     path = Path(raw).expanduser()
     if not path.is_absolute():
         path = rootdir / path
     return path.resolve()
 
 
+def _inventory_source(config):
+    """按 命令行 > pytest 配置 > 插件默认值 的顺序返回 ``(raw, 来源说明)``。"""
+    cli = config.getoption("--device-inventory")
+    if cli:
+        return cli, "命令行 --device-inventory"
+
+    ini = config.getini("device_inventory")
+    if ini:
+        return ini, "pytest 配置 device_inventory"
+
+    return DEFAULT_INVENTORY, "插件默认值"
+
+
 @pytest.fixture(scope="session")
 def device_inventory_path(request):
-    """``--device-inventory`` 指定的清单文件路径（绝对 ``Path``）。"""
-    raw = request.config.getoption("--device-inventory")
-    if not raw:
-        pytest.skip("未提供 --device-inventory，无法初始化清单")
-
-    rootdir = request.config.rootpath
+    """清单源路径（文件或目录），返回绝对 ``Path``。"""
+    config = request.config
+    rootdir = config.rootpath
+    raw, source = _inventory_source(config)
     path = _resolve_path(raw, rootdir)
-    if not path.is_file():
+
+    if not path.exists():
         pytest.fail(
-            f"--device-inventory 指向的清单文件不存在: {path}"
-            f"（相对路径基于 rootdir: {rootdir}）"
+            f"清单源不存在: {path}"
+            f"（来源: {source}；相对路径基于 rootdir: {rootdir}）"
+        )
+    if path.is_dir() and not any(path.iterdir()):
+        pytest.fail(
+            f"清单目录为空: {path}"
+            f"（来源: {source}；相对路径基于 rootdir: {rootdir}）"
         )
     return path
 

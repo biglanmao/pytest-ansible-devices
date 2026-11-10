@@ -31,16 +31,31 @@ pytest --help | grep -A3 'ansible-runner'
 
 ## 2. 命令行选项
 
-| 选项 | 说明 |
+| 选项 / 配置项 | 说明 |
 |---|---|
-| `--device-inventory` | 清单文件路径。相对路径以 pytest rootdir 为基准。**未提供**：依赖它的用例 `skip`；**提供了但文件不存在**：报错并给出绝对路径 |
+| `--device-inventory` | 清单源，**文件或目录**均可。相对路径以 pytest rootdir 为基准 |
+| `device_inventory`（pytest 配置） | 同上，作为命令行选项的兜底 |
 
-示例：
+取值优先级：**命令行 > pytest 配置 > 插件默认值**。
+
+插件默认值为 `<rootdir>/etc/devices/inventory`。目录形态要求存在且非空，
+否则报错并给出绝对路径与 rootdir；**未配置且默认目录不存在时报错，不再 skip**。
 
 ```bash
 pytest tests/ --device-inventory=tests/inventory.ini
-pytest tests/ --device-inventory=/abs/path/inventory.ini
+pytest tests/ --device-inventory=/abs/path/inventory
 ```
+
+`pytest.ini` / `pyproject.toml` 中配置：
+
+```ini
+[pytest]
+device_inventory = etc/devices/inventory
+```
+
+> 使用 `pytest -c etc/pytest.toml` 时，pytest 的 **rootdir 是 `etc/`**，
+> 相对路径以 `etc/` 为基准。此时应写 `device_inventory = devices/inventory`，
+> 不要写成 `etc/devices/inventory`（会变成 `etc/etc/devices/inventory`）。
 
 ---
 
@@ -48,11 +63,13 @@ pytest tests/ --device-inventory=/abs/path/inventory.ini
 
 ### `device_inventory_path`
 
-session 级，返回**绝对 `Path`**。
+session 级，返回**绝对 `Path`**。路径可以是文件，也可以是目录。
 
 ```python
 def test_inventory_exists(device_inventory_path):
-    assert device_inventory_path.is_file()
+    assert device_inventory_path.exists()
+    # 目录清单：group_vars/、host_vars/ 放在该目录内部
+    assert device_inventory_path.is_dir() or device_inventory_path.is_file()
 ```
 
 > `ansible-runner` 的 `inventory` 参数要求字符串，传给执行层时用 `str(device_inventory_path)`。
@@ -60,7 +77,10 @@ def test_inventory_exists(device_inventory_path):
 
 ### `device_inventory`
 
-session 级，返回 ansible-core 的 `InventoryManager`。适合按设备名断言、读取主机变量；**不用于执行**。
+session 级，返回 ansible-core 的 `InventoryManager`。适合按设备名断言、读取 inventory 内联变量；**不用于执行**。
+
+> 注意：`InventoryManager` 只解析清单，**不会加载 `group_vars/` / `host_vars/`**；
+> 这两类变量在 ansible-runner 执行时由 Ansible 加载。
 
 ```python
 def test_device_exists(device_inventory):
@@ -380,6 +400,13 @@ tmp_path_retention_count = 3
 8. **`runner_context` 退出会删除临时目录**
    需要的事件、结果、artifact 路径都要在 `with` 块内读取完。
 
+9. **用 `-c` 指定配置文件时，rootdir 会变**
+   `pytest -c etc/pytest.toml` 的 rootdir 是 `etc/`，`device_inventory` 的相对路径
+   以 `etc/` 为基准；写错会出现 `etc/etc/...`。
+
+10. **目录清单的 `group_vars/` 必须放在目录内部**
+    `-i .../inventory` 时只认 `.../inventory/group_vars/`，同级的 `group_vars/` 不生效。
+
 ---
 
 ## 9. 兼容性说明
@@ -392,3 +419,7 @@ tmp_path_retention_count = 3
   - 迁移：用例改用 pytest 的 `tmp_path`，传 `private_data_dir=str(tmp_path)`；
   - 需要固定目录时在用例内显式传 `private_data_dir=...`；
   - 不要再依赖任何全局工作目录开关。
+- **行为变更（PAD-FR-19）**：`--device-inventory` 现在接受文件或目录，
+  并新增 pytest 配置项 `device_inventory` 与默认目录 `<rootdir>/etc/devices/inventory`。
+  - 以前未配置时 `skip`，现在会报错（默认目录不存在或为空都会报错）；
+  - 只跑非设备用例时不受影响；请求了 inventory fixture 的用例需要保证清单源可用。
