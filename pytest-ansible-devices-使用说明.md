@@ -1,0 +1,406 @@
+# pytest-ansible-devices 使用说明
+
+> 适用版本：0.1.0
+> 依赖：`pytest>=7`、`ansible-core>=2.16`、`ansible-runner>=2.4`
+
+本插件只消除**重复配置**，不封装执行与结果：
+
+- 提供 inventory 路径、runner 工作目录等 fixture；
+- 提供 `runner_context` 管理 `Runner` 生命周期；
+- 执行仍然直接调用 `ansible_runner.run`，结果仍然直接读 `runner.status / rc / events / stats`；
+- 不提供设备管理器、连接池、结果对象、playbook 目录等额外抽象。
+
+---
+
+## 1. 安装与启用
+
+```bash
+pip install -e .          # 本地开发
+# 或：pip install pytest-ansible-devices
+```
+
+插件通过 `pytest11` entry point 自动注册，**不需要**在 `conftest.py` 里写 `pytest_plugins`。
+
+验证：
+
+```bash
+pytest --help | grep -A3 'ansible-runner'
+```
+
+---
+
+## 2. 命令行选项
+
+| 选项 | 说明 |
+|---|---|
+| `--device-inventory` | 清单文件路径。相对路径以 pytest rootdir 为基准。**未提供**：依赖它的用例 `skip`；**提供了但文件不存在**：报错并给出绝对路径 |
+| `--device-private-data-dir` | ansible-runner 工作目录。相对路径以 pytest rootdir 为基准。**未提供**：使用当前测试的 `tmp_path`（每个测试独立、自动清理） |
+
+示例：
+
+```bash
+pytest tests/ --device-inventory=tests/inventory.ini
+
+pytest tests/ \
+  --device-inventory=/abs/path/inventory.ini \
+  --device-private-data-dir=build/runner
+```
+
+---
+
+## 3. Fixtures
+
+### `device_inventory_path`
+
+session 级，返回**绝对 `Path`**。
+
+```python
+def test_inventory_exists(device_inventory_path):
+    assert device_inventory_path.is_file()
+```
+
+> `ansible-runner` 的 `inventory` 参数要求字符串，传给执行层时用 `str(device_inventory_path)`。
+> fixture 已经做过 `expanduser()` 和 `resolve()`，用例里不需要再 `Path(...).resolve()`。
+
+### `device_inventory`
+
+session 级，返回 ansible-core 的 `InventoryManager`。适合按设备名断言、读取主机变量；**不用于执行**。
+
+```python
+def test_device_exists(device_inventory):
+    assert "web1" in device_inventory.hosts
+
+    host = device_inventory.get_host("web1")
+    assert host is not None
+    assert host.vars.get("ansible_connection") in {"ssh", "local", None}
+```
+
+### `device_private_data_dir`
+
+函数级，返回**绝对 `Path`**。
+
+```python
+def test_workdir(device_private_data_dir):
+    assert device_private_data_dir.is_dir()
+```
+
+- 未传 `--device-private-data-dir`：就是当前测试的 `tmp_path`；
+- 传了：使用配置的目录（相对路径已按 rootdir 解析），目录由 ansible-runner 创建。
+
+### 执行前校验设备名（可选）
+
+Ansible 对不存在的 `host_pattern` 只打 warning，`rc` 仍可能是 0，用例会假通过。
+执行前用 `device_inventory` 校验一次即可：
+
+```python
+def test_device(device_inventory):
+    device = "web1"
+    assert device in device_inventory.hosts, (
+        f"设备不存在: {device}; 可用: {sorted(device_inventory.hosts)}"
+    )
+```
+
+---
+
+## 4. 执行示例
+
+### 4.1 SSH ad-hoc
+
+```python
+import ansible_runner
+
+DEVICE = "web1"
+
+
+def test_ssh_adhoc(device_inventory_path, device_private_data_dir):
+    result = ansible_runner.run(
+        inventory=str(device_inventory_path),
+        private_data_dir=str(device_private_data_dir),
+        host_pattern=DEVICE,
+        module="command",
+        module_args="echo hello",
+        quiet=True,
+    )
+
+    assert result.rc == 0 and result.status == "successful"
+```
+
+### 4.2 SSH playbook
+
+playbook 目录由**用例自己指定**，插件不提供 `--device-playbook-dir`。
+
+```python
+def test_ssh_playbook(device_inventory_path, device_private_data_dir):
+    result = ansible_runner.run(
+        inventory=str(device_inventory_path),
+        private_data_dir=str(device_private_data_dir),
+        project_dir="/abs/path/to/playbooks",
+        playbook="smoke.yml",
+        extravars={"target_host": DEVICE},
+        quiet=True,
+    )
+
+    assert result.rc == 0 and result.status == "successful"
+```
+
+### 4.3 串口 / 本地连接
+
+连接方式由 inventory 或命令行显式指定，插件不自动判断。
+
+```python
+import json
+
+
+def test_serial_adhoc(device_inventory_path, device_private_data_dir):
+    result = ansible_runner.run(
+        inventory=str(device_inventory_path),
+        private_data_dir=str(device_private_data_dir),
+        host_pattern=DEVICE,
+        module="flytrap.tux.serial",
+        module_args=json.dumps({"commands": ["ls -la"]}),
+        cmdline="--connection local",
+        quiet=True,
+    )
+
+    assert result.rc == 0 and result.status == "successful"
+```
+
+> `module_args` 目前必须是字符串；复杂参数用 `json.dumps(...)`。
+
+### 4.4 串口 playbook
+
+串口连接方式写在 playbook / inventory 里；插件只负责路径与生命周期。
+
+```python
+def test_serial_playbook(device_inventory_path, device_private_data_dir):
+    result = ansible_runner.run(
+        inventory=str(device_inventory_path),
+        private_data_dir=str(device_private_data_dir),
+        project_dir="/abs/path/to/playbooks",
+        playbook="serial_smoke.yml",
+        extravars={"target_host": DEVICE},
+        quiet=True,
+    )
+
+    assert result.rc == 0 and result.status == "successful"
+```
+
+### 4.5 用 `runner_context` 管理生命周期
+
+```python
+from pytest_ansible_devices import runner_context
+
+
+def test_with_context(device_inventory_path):
+    with runner_context(
+        host="web1",
+        inventory=str(device_inventory_path),
+        module="command",
+        module_args="echo ok",
+    ) as runner:
+        runner.run()
+        assert runner.status == "successful"
+```
+
+清理规则：
+
+- 不传 `private_data_dir`：临时目录，退出 `with` 时删除；
+- 显式传 `private_data_dir`：退出后保留，便于事后排查。
+
+---
+
+## 5. 读取结果（不封装）
+
+直接使用 ansible-runner 的原始属性：
+
+| 属性 | 用途 |
+|---|---|
+| `result.status` | `"successful"` / `"failed"` 等 |
+| `result.rc` | 进程返回码 |
+| `result.stats` | play recap（ok / changed / failures 等） |
+| `result.events` | 全部事件 |
+| `result.config.artifact_dir` | 本次执行的 artifact 目录 |
+
+### 5.1 取命令输出
+
+```python
+payloads = [
+    event["event_data"]["res"]
+    for event in result.events
+    if event.get("event") == "runner_on_ok"
+]
+
+stdout = "\n".join(p.get("stdout", "") for p in payloads).strip()
+```
+
+### 5.2 取失败信息
+
+```python
+FAILED_EVENTS = {
+    "runner_on_failed",
+    "runner_on_unreachable",
+    "runner_on_async_failed",
+    "runner_on_timeout",
+}
+
+failed = next(
+    (e for e in reversed(result.events) if e.get("event") in FAILED_EVENTS),
+    None,
+)
+
+if failed is not None:
+    data = failed.get("event_data", {})
+    task = data.get("task")              # 失败任务名（ad-hoc 下是模块名）
+    res = data.get("res", {})
+    message = res.get("msg") or res.get("stderr")
+    stderr = res.get("stderr")
+```
+
+### 5.3 判断整体成功
+
+```python
+ok = result.status == "successful" and result.rc == 0
+```
+
+---
+
+## 6. 失败排查
+
+断言失败时把关键信息一次性打出来，避免只看到 `rc` 不知道发生了什么：
+
+```python
+FAILED_EVENTS = {
+    "runner_on_failed",
+    "runner_on_unreachable",
+    "runner_on_async_failed",
+    "runner_on_timeout",
+}
+
+
+def failure_report(result) -> str:
+    cfg = result.config
+    failed = next(
+        (e for e in reversed(result.events) if e.get("event") in FAILED_EVENTS),
+        None,
+    )
+    data = (failed or {}).get("event_data", {})
+    res = data.get("res", {})
+
+    return "\n".join([
+        f"device={cfg.host_pattern}",
+        f"inventory={cfg.inventory}",
+        f"playbook={cfg.playbook} module={cfg.module}",
+        f"command={' '.join(cfg.command)}",
+        f"artifact={cfg.artifact_dir}",
+        f"status={result.status} rc={result.rc}",
+        f"failed_task={data.get('task')}",
+        f"error={res.get('msg') or res.get('stderr')}",
+        f"stderr={res.get('stderr')}",
+    ])
+```
+
+用法：
+
+```python
+assert result.rc == 0 and result.status == "successful", failure_report(result)
+```
+
+字段来源：
+
+| 需要信息 | 来源 |
+|---|---|
+| 目标设备 | `result.config.host_pattern` |
+| inventory 路径 | `result.config.inventory` |
+| playbook / module | `result.config.playbook` / `result.config.module` |
+| 实际命令行 | `result.config.command` |
+| artifact 目录 | `result.config.artifact_dir` |
+| 失败任务名 | `runner_on_failed` 等事件的 `event_data.task` |
+| stderr / failed payload | 同一事件的 `event_data.res` |
+
+### 常见错误定位
+
+| 现象 | 先看哪里 |
+|---|---|
+| 设备不存在 | Ansible 只打 warning、`rc` 仍可能为 0；用 `device_inventory` 断言（见 §3） |
+| playbook 不存在 | Ansible 报错文本；`failed_payload` / artifact 下的 stdout |
+| collection 未找到 | 报错含 `couldn't resolve module/action`；检查 `ansible-galaxy collection list` |
+| 串口打开失败 | `failed_payload["msg"]` / `failed_payload["stderr"]` |
+| 模块参数错误 | `failed_payload["msg"]`；对照模块文档检查 `module_args` |
+
+> `artifact` 目录：`runner_context` 的临时目录在退出时删除，需要保留时显式传
+> `private_data_dir`，或在 `with` 块内读取。
+
+---
+
+## 7. 工作目录与清理策略
+
+插件不提供额外的 artifacts 配置，工作目录完全由现有机制控制：
+
+| 需求 | 做法 |
+|---|---|
+| 每个测试独立目录 | 默认行为：`device_private_data_dir` 就是当前测试的 `tmp_path` |
+| 共享 / 固定目录 | `--device-private-data-dir=build/runner`（显式目录，**不会**自动清理） |
+| 固定 pytest 临时根目录 | `pytest --basetemp=build/pytest` |
+| 保留失败现场 | `tmp_path_retention_policy = failed` |
+| 成功后自动清理 | `tmp_path_retention_policy = none` |
+| `runner_context` 临时目录 | 未显式传 `private_data_dir` 时，退出 `with` 立即删除 |
+
+`pytest.ini` 示例：
+
+```ini
+[pytest]
+tmp_path_retention_policy = failed
+tmp_path_retention_count = 3
+```
+
+- `all`（默认）：保留最近 3 次 session 的所有目录；
+- `failed`：只保留失败用例的目录；
+- `none`：不保留，全部清理。
+
+> 当前环境（pytest 9.2）已验证这些选项可用；项目声明 `pytest>=7`，
+> 旧版本没有该 ini 选项时沿用默认保留策略。
+>
+> 插件**不提供** `--device-artifacts-dir` / `--device-keep-artifacts`：
+> 前者与 `--device-private-data-dir` 重复，后者需要隐式判断测试结果。
+
+---
+
+## 8. 常见坑
+
+1. **不要把 `Path` 直接传给 `ansible_runner.run(inventory=...)`**
+   ansible-runner 会在拼命令时抛 `TypeError`，需要 `str(device_inventory_path)`。
+   `private_data_dir` 可以接受 `Path`，但统一用 `str(...)` 更省心。
+
+2. **`module_args` 必须是字符串**
+   复杂参数用 `json.dumps({"commands": ["ls -la"]})`。
+
+3. **串口 ad-hoc 要显式 `cmdline="--connection local"`**
+   插件不会替你猜连接方式，猜错比显式写一行更难排查。
+
+4. **集合用 `ansible-galaxy install` 安装到 Ansible 默认路径**
+   插件不提供 `--device-collections-path`，也不会设置 `ANSIBLE_COLLECTIONS_PATH`。
+
+5. **playbook 目录由用例指定**
+   插件没有 `--device-playbook-dir`，用 `project_dir=` 或 playbook 的绝对路径。
+
+6. **默认每个测试独立临时目录**
+   想保留现场：传 `--device-private-data-dir=build/runner`，或自己传 `private_data_dir`。
+
+7. **不要在用例里临时写 inventory 模拟设备**
+   设备信息只来自 `--device-inventory`，否则等于维护第二套设备真相。
+
+8. **`runner_context` 退出会删除临时目录**
+   需要的事件、结果、artifact 路径都要在 `with` 块内读取完。
+
+9. **`device_private_data_dir` 是函数级 fixture**
+   session 级 fixture 不能依赖它；会话级共享目录请用 `--device-private-data-dir` 显式指定。
+
+---
+
+## 9. 兼容性说明
+
+- fixture 返回值已统一为绝对 `Path`（旧版本是字符串）：
+  - `str(device_inventory_path)`、`Path(device_inventory_path)` 都可用；
+  - 直接做字符串拼接的代码需要显式 `str(...)`。
+- `device_private_data_dir` 不再返回 `None`，未配置时为当前测试的 `tmp_path`；
+  旧代码里的 `if device_private_data_dir is None:` 分支可以删掉。

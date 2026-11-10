@@ -25,13 +25,13 @@ def pytest_addoption(parser):
         "--device-inventory",
         action="store",
         default=None,
-        help="清单文件路径",
+        help="清单文件路径（相对路径基于 pytest rootdir）",
     )
     group.addoption(
         "--device-private-data-dir",
         action="store",
         default=None,
-        help="devices-runner 工作目录；为空时每次执行使用临时目录",
+        help="ansible-runner 工作目录（相对路径基于 pytest rootdir）；为空时每次执行使用临时目录",
     )
 
 
