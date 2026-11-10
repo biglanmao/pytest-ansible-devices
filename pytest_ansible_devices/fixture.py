@@ -64,3 +64,11 @@ def device_inventory(device_inventory_path):
     loader = DataLoader()
     # InventoryManager 要求 sources 为字符串（内部做 `',' in source` 判断）。
     return InventoryManager(loader=loader, sources=[str(device_inventory_path)])
+
+
+@pytest.fixture(scope="session")
+def device_runner_context():
+    """提供与插件属性等价的 ``runner_context`` 上下文管理器。"""
+    from .runner_context import runner_context
+
+    return runner_context

@@ -107,3 +107,12 @@ def test_runs_playbook(inventory_file, tmp_path):
         ]
 
     assert "playbook_ok" in stdout_values
+
+
+def test_device_runner_context_fixture(device_runner_context, inventory_file):
+    """``device_runner_context`` fixture 应与模块函数行为一致。"""
+    with device_runner_context(
+        host="web1", inventory=inventory_file, module="ping"
+    ) as runner:
+        runner.run()
+        assert runner.status == "successful"

@@ -12,7 +12,13 @@ import sys
 import pytest
 
 # 导入即注册 fixture（pytest 会收集插件模块上的 fixture 属性）。
-from .fixture import device_inventory, device_inventory_path  # noqa: F401
+from .fixture import (  # noqa: F401
+    device_inventory,
+    device_inventory_path,
+    device_runner_context,
+)
+# 暴露给 pytestconfig.pluginmanager.get_plugin(...).runner_context
+from .runner_context import runner_context  # noqa: F401
 
 
 def pytest_addoption(parser):

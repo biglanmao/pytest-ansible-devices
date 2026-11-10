@@ -191,12 +191,17 @@ def test_serial_playbook(device_inventory_path, tmp_path):
 
 ### 4.5 用 `runner_context` 管理生命周期
 
+`runner_context` 是高级入口，与直接调用 `ansible_runner.run` 并存。三种获取方式等价。
+
+**推荐：通过插件对象**
+
 ```python
-from pytest_ansible_devices import runner_context
+def test_with_plugin(pytestconfig, device_inventory_path):
+    plugin = pytestconfig.pluginmanager.get_plugin("pytest_ansible_devices")
+    if plugin is None:
+        pytest.fail("pytest_ansible_devices 插件未启用（检查 -p no:...）")
 
-
-def test_with_context(device_inventory_path):
-    with runner_context(
+    with plugin.runner_context(
         host="web1",
         inventory=str(device_inventory_path),
         module="command",
@@ -205,6 +210,31 @@ def test_with_context(device_inventory_path):
         runner.run()
         assert runner.status == "successful"
 ```
+
+**或者：fixture 注入**
+
+```python
+def test_with_fixture(device_runner_context, device_inventory_path):
+    with device_runner_context(
+        host="web1",
+        inventory=str(device_inventory_path),
+        module="command",
+        module_args="echo ok",
+    ) as runner:
+        runner.run()
+        assert runner.status == "successful"
+```
+
+**也可以：直接导入**
+
+```python
+from pytest_ansible_devices import runner_context
+```
+
+> - 插件被 `-p no:pytest_ansible_devices` 禁用时，插件代码不会加载，
+>   `get_plugin(...)` 返回 `None`，只能由调用方判空并报错。
+> - 使用 `pluginmanager.get_plugin()`，不要用旧别名 `getplugin()`。
+> - 三种方式指向同一实现，行为一致。
 
 清理规则：
 
