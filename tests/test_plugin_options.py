@@ -57,30 +57,8 @@ def test_relative_paths_resolve_against_rootdir(tmp_path):
     assert _resolve_path("inventory", rootdir) == (rootdir / "inventory").resolve()
 
 
-def test_default_inventory_dir_is_used(pytester):
-    """未提供选项和配置时，使用 <rootdir>/etc/devices/inventory。"""
-    inventory_dir = pytester.path / "etc" / "devices" / "inventory"
-    _write_inventory(inventory_dir / "hosts.ini")
-
-    pytester.makepyfile(
-        f"""
-        from pathlib import Path
-
-        def test_default(device_inventory_path, device_inventory):
-            assert device_inventory_path == Path({str(inventory_dir.resolve())!r})
-            assert device_inventory_path.is_dir()
-            assert "web1" in device_inventory.hosts
-        """
-    )
-
-    result = pytester.runpytest_subprocess("-q")
-
-    result.assert_outcomes(passed=1)
-
-
-def test_missing_default_inventory_errors(pytester):
-    """默认目录不存在时应报错，而不是静默 skip。"""
-    expected = (pytester.path / "etc" / "devices" / "inventory").resolve()
+def test_unconfigured_inventory_errors(pytester):
+    """既没有命令行选项也没有配置项时，应报错并提示如何配置。"""
     pytester.makepyfile(
         """
         def test_needs_inventory(device_inventory_path):
@@ -92,9 +70,28 @@ def test_missing_default_inventory_errors(pytester):
 
     result.assert_outcomes(errors=1)
     stdout = result.stdout.str()
-    assert "清单源不存在" in stdout
-    assert "插件默认值" in stdout
-    assert str(expected) in stdout
+    assert "未配置清单源" in stdout
+    assert "--device-inventory" in stdout
+    assert "device_inventory" in stdout
+    assert str(pytester.path.resolve()) in stdout
+
+
+def test_default_dir_is_not_implicit(pytester):
+    """即使 etc/devices/inventory 存在，未显式配置也必须报错（无内置默认值）。"""
+    inventory_dir = pytester.path / "etc" / "devices" / "inventory"
+    _write_inventory(inventory_dir / "hosts.ini")
+
+    pytester.makepyfile(
+        """
+        def test_needs_inventory(device_inventory_path):
+            assert device_inventory_path
+        """
+    )
+
+    result = pytester.runpytest_subprocess("-q")
+
+    result.assert_outcomes(errors=1)
+    assert "未配置清单源" in result.stdout.str()
 
 
 def test_ini_config_is_used(pytester):

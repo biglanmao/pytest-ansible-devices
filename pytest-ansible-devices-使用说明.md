@@ -36,10 +36,10 @@ pytest --help | grep -A3 'ansible-runner'
 | `--device-inventory` | 清单源，**文件或目录**均可。相对路径以 pytest rootdir 为基准 |
 | `device_inventory`（pytest 配置） | 同上，作为命令行选项的兜底 |
 
-取值优先级：**命令行 > pytest 配置 > 插件默认值**。
+取值优先级：**命令行 > pytest 配置**。
 
-插件默认值为 `<rootdir>/etc/devices/inventory`。目录形态要求存在且非空，
-否则报错并给出绝对路径与 rootdir；**未配置且默认目录不存在时报错，不再 skip**。
+插件**不提供内置默认目录**：未配置时直接报错，并提示两种配置方式。
+目录形态要求存在且非空，否则报错并给出绝对路径与 rootdir。
 
 ```bash
 pytest tests/ --device-inventory=tests/inventory.ini
@@ -420,6 +420,6 @@ tmp_path_retention_count = 3
   - 需要固定目录时在用例内显式传 `private_data_dir=...`；
   - 不要再依赖任何全局工作目录开关。
 - **行为变更（PAD-FR-19）**：`--device-inventory` 现在接受文件或目录，
-  并新增 pytest 配置项 `device_inventory` 与默认目录 `<rootdir>/etc/devices/inventory`。
-  - 以前未配置时 `skip`，现在会报错（默认目录不存在或为空都会报错）；
-  - 只跑非设备用例时不受影响；请求了 inventory fixture 的用例需要保证清单源可用。
+  并新增 pytest 配置项 `device_inventory`。
+  - **不提供内置默认目录**；未配置、路径不存在、目录为空都会报错（以前是 `skip`）；
+  - 只跑非设备用例时不受影响；请求了 inventory fixture 的用例必须先显式配置清单源。

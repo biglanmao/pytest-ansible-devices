@@ -4,8 +4,6 @@ from pathlib import Path
 
 import pytest
 
-DEFAULT_INVENTORY = "etc/devices/inventory"
-
 
 def _resolve_path(raw, rootdir: Path) -> Path:
     """把命令行/配置路径解析为绝对 ``Path``；相对路径以 pytest rootdir 为基准。"""
@@ -16,7 +14,7 @@ def _resolve_path(raw, rootdir: Path) -> Path:
 
 
 def _inventory_source(config):
-    """按 命令行 > pytest 配置 > 插件默认值 的顺序返回 ``(raw, 来源说明)``。"""
+    """按 命令行 > pytest 配置 的顺序返回 ``(raw, 来源说明)``；都未配置时返回 None。"""
     cli = config.getoption("--device-inventory")
     if cli:
         return cli, "命令行 --device-inventory"
@@ -25,7 +23,7 @@ def _inventory_source(config):
     if ini:
         return ini, "pytest 配置 device_inventory"
 
-    return DEFAULT_INVENTORY, "插件默认值"
+    return None, None
 
 
 @pytest.fixture(scope="session")
@@ -34,6 +32,14 @@ def device_inventory_path(request):
     config = request.config
     rootdir = config.rootpath
     raw, source = _inventory_source(config)
+    if raw is None:
+        pytest.fail(
+            "未配置清单源。请任选一种方式指定：\n"
+            "  - 命令行: pytest --device-inventory=<文件或目录>\n"
+            "  - pytest 配置: [pytest] device_inventory = <文件或目录>\n"
+            f"相对路径基于 rootdir: {rootdir}"
+        )
+
     path = _resolve_path(raw, rootdir)
 
     if not path.exists():
