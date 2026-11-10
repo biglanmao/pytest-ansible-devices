@@ -34,16 +34,12 @@ pytest --help | grep -A3 'ansible-runner'
 | 选项 | 说明 |
 |---|---|
 | `--device-inventory` | 清单文件路径。相对路径以 pytest rootdir 为基准。**未提供**：依赖它的用例 `skip`；**提供了但文件不存在**：报错并给出绝对路径 |
-| `--device-private-data-dir` | ansible-runner 工作目录。相对路径以 pytest rootdir 为基准。**未提供**：使用当前测试的 `tmp_path`（每个测试独立、自动清理） |
 
 示例：
 
 ```bash
 pytest tests/ --device-inventory=tests/inventory.ini
-
-pytest tests/ \
-  --device-inventory=/abs/path/inventory.ini \
-  --device-private-data-dir=build/runner
+pytest tests/ --device-inventory=/abs/path/inventory.ini
 ```
 
 ---
@@ -75,18 +71,6 @@ def test_device_exists(device_inventory):
     assert host.vars.get("ansible_connection") in {"ssh", "local", None}
 ```
 
-### `device_private_data_dir`
-
-函数级，返回**绝对 `Path`**。
-
-```python
-def test_workdir(device_private_data_dir):
-    assert device_private_data_dir.is_dir()
-```
-
-- 未传 `--device-private-data-dir`：就是当前测试的 `tmp_path`；
-- 传了：使用配置的目录（相对路径已按 rootdir 解析），目录由 ansible-runner 创建。
-
 ### 执行前校验设备名（可选）
 
 Ansible 对不存在的 `host_pattern` 只打 warning，`rc` 仍可能是 0，用例会假通过。
@@ -112,10 +96,10 @@ import ansible_runner
 DEVICE = "web1"
 
 
-def test_ssh_adhoc(device_inventory_path, device_private_data_dir):
+def test_ssh_adhoc(device_inventory_path, tmp_path):
     result = ansible_runner.run(
         inventory=str(device_inventory_path),
-        private_data_dir=str(device_private_data_dir),
+        private_data_dir=str(tmp_path),
         host_pattern=DEVICE,
         module="command",
         module_args="echo hello",
@@ -130,10 +114,10 @@ def test_ssh_adhoc(device_inventory_path, device_private_data_dir):
 playbook 目录由**用例自己指定**，插件不提供 `--device-playbook-dir`。
 
 ```python
-def test_ssh_playbook(device_inventory_path, device_private_data_dir):
+def test_ssh_playbook(device_inventory_path, tmp_path):
     result = ansible_runner.run(
         inventory=str(device_inventory_path),
-        private_data_dir=str(device_private_data_dir),
+        private_data_dir=str(tmp_path),
         project_dir="/abs/path/to/playbooks",
         playbook="smoke.yml",
         extravars={"target_host": DEVICE},
@@ -151,10 +135,10 @@ def test_ssh_playbook(device_inventory_path, device_private_data_dir):
 import json
 
 
-def test_serial_adhoc(device_inventory_path, device_private_data_dir):
+def test_serial_adhoc(device_inventory_path, tmp_path):
     result = ansible_runner.run(
         inventory=str(device_inventory_path),
-        private_data_dir=str(device_private_data_dir),
+        private_data_dir=str(tmp_path),
         host_pattern=DEVICE,
         module="flytrap.tux.serial",
         module_args=json.dumps({"commands": ["ls -la"]}),
@@ -172,10 +156,10 @@ def test_serial_adhoc(device_inventory_path, device_private_data_dir):
 串口连接方式写在 playbook / inventory 里；插件只负责路径与生命周期。
 
 ```python
-def test_serial_playbook(device_inventory_path, device_private_data_dir):
+def test_serial_playbook(device_inventory_path, tmp_path):
     result = ansible_runner.run(
         inventory=str(device_inventory_path),
-        private_data_dir=str(device_private_data_dir),
+        private_data_dir=str(tmp_path),
         project_dir="/abs/path/to/playbooks",
         playbook="serial_smoke.yml",
         extravars={"target_host": DEVICE},
@@ -338,12 +322,15 @@ assert result.rc == 0 and result.status == "successful", failure_report(result)
 
 | 需求 | 做法 |
 |---|---|
-| 每个测试独立目录 | 默认行为：`device_private_data_dir` 就是当前测试的 `tmp_path` |
-| 共享 / 固定目录 | `--device-private-data-dir=build/runner`（显式目录，**不会**自动清理） |
+| 每个测试独立目录 | 用例显式传 `private_data_dir=str(tmp_path)` |
+| 固定位置排查 | 显式传一个固定目录，如 `private_data_dir=str(tmp_path / "runner")`（目录需先创建） |
 | 固定 pytest 临时根目录 | `pytest --basetemp=build/pytest` |
 | 保留失败现场 | `tmp_path_retention_policy = failed` |
 | 成功后自动清理 | `tmp_path_retention_policy = none` |
 | `runner_context` 临时目录 | 未显式传 `private_data_dir` 时，退出 `with` 立即删除 |
+
+> 插件不提供 `--device-private-data-dir` 或 `device_private_data_dir` fixture：
+> 运行时目录由用例直接传给 `ansible_runner.run`，插件不再持有全局开关。
 
 `pytest.ini` 示例：
 
@@ -361,7 +348,7 @@ tmp_path_retention_count = 3
 > 旧版本没有该 ini 选项时沿用默认保留策略。
 >
 > 插件**不提供** `--device-artifacts-dir` / `--device-keep-artifacts`：
-> 前者与 `--device-private-data-dir` 重复，后者需要隐式判断测试结果。
+> 目录保留与清理交给 pytest，插件不额外引入全局开关。
 
 ---
 
@@ -383,17 +370,15 @@ tmp_path_retention_count = 3
 5. **playbook 目录由用例指定**
    插件没有 `--device-playbook-dir`，用 `project_dir=` 或 playbook 的绝对路径。
 
-6. **默认每个测试独立临时目录**
-   想保留现场：传 `--device-private-data-dir=build/runner`，或自己传 `private_data_dir`。
+6. **运行时目录用 `tmp_path`**
+   在用例里传 `private_data_dir=str(tmp_path)`；需要保留现场时用 §7 的
+   `tmp_path_retention_policy`，或显式传一个固定目录。
 
 7. **不要在用例里临时写 inventory 模拟设备**
    设备信息只来自 `--device-inventory`，否则等于维护第二套设备真相。
 
 8. **`runner_context` 退出会删除临时目录**
    需要的事件、结果、artifact 路径都要在 `with` 块内读取完。
-
-9. **`device_private_data_dir` 是函数级 fixture**
-   session 级 fixture 不能依赖它；会话级共享目录请用 `--device-private-data-dir` 显式指定。
 
 ---
 
@@ -402,5 +387,8 @@ tmp_path_retention_count = 3
 - fixture 返回值已统一为绝对 `Path`（旧版本是字符串）：
   - `str(device_inventory_path)`、`Path(device_inventory_path)` 都可用；
   - 直接做字符串拼接的代码需要显式 `str(...)`。
-- `device_private_data_dir` 不再返回 `None`，未配置时为当前测试的 `tmp_path`；
-  旧代码里的 `if device_private_data_dir is None:` 分支可以删掉。
+- **破坏性变更（PAD-FR-16）**：`--device-private-data-dir` 选项与
+  `device_private_data_dir` fixture 已删除。
+  - 迁移：用例改用 pytest 的 `tmp_path`，传 `private_data_dir=str(tmp_path)`；
+  - 需要固定目录时在用例内显式传 `private_data_dir=...`；
+  - 不要再依赖任何全局工作目录开关。

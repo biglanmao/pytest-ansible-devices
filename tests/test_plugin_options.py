@@ -2,14 +2,30 @@
 
 
 def test_cli_options_are_registered(pytester):
-    """``--device-inventory`` / ``--device-private-data-dir`` 应出现在 --help 中。"""
+    """``--device-inventory`` 应出现在 --help 中。"""
     result = pytester.runpytest_subprocess("--help")
-    result.stdout.fnmatch_lines(
-        [
-            "*--device-inventory*",
-            "*--device-private-data-dir*",
-        ]
+    result.stdout.fnmatch_lines(["*--device-inventory*"])
+
+
+def test_private_data_dir_option_is_removed(pytester):
+    """``--device-private-data-dir`` 已取消，不应再出现在 --help 中。"""
+    result = pytester.runpytest_subprocess("--help")
+    assert "--device-private-data-dir" not in result.stdout.str()
+
+
+def test_private_data_dir_fixture_is_removed(pytester):
+    """``device_private_data_dir`` fixture 已删除，请求它应报 fixture 不存在。"""
+    pytester.makepyfile(
+        """
+        def test_uses_removed_fixture(device_private_data_dir):
+            pass
+        """
     )
+
+    result = pytester.runpytest_subprocess("-q")
+
+    result.assert_outcomes(errors=1)
+    assert "fixture 'device_private_data_dir' not found" in result.stdout.str()
 
 
 def test_inventory_path_fixture_skips_without_option(pytester):
@@ -26,25 +42,20 @@ def test_inventory_path_fixture_skips_without_option(pytester):
     result.assert_outcomes(skipped=1)
 
 
-def test_fixtures_read_cli_options(pytester, pytester_inventory):
-    """fixture 应返回命令行传入路径的绝对 ``Path``。"""
-    private_data_dir = pytester.path / "runner"
+def test_inventory_path_fixture_returns_absolute_path(pytester, pytester_inventory):
+    """``device_inventory_path`` 应返回命令行传入路径的绝对 ``Path``。"""
     pytester.makepyfile(
         f"""
         from pathlib import Path
 
-        def test_option_values(device_inventory_path, device_private_data_dir):
+        def test_option_values(device_inventory_path):
             assert device_inventory_path == Path({str(pytester_inventory)!r})
-            assert device_private_data_dir == Path({str(private_data_dir)!r})
             assert device_inventory_path.is_absolute()
-            assert device_private_data_dir.is_absolute()
         """
     )
 
     result = pytester.runpytest_subprocess(
-        f"--device-inventory={pytester_inventory}",
-        f"--device-private-data-dir={private_data_dir}",
-        "-q",
+        f"--device-inventory={pytester_inventory}", "-q"
     )
 
     result.assert_outcomes(passed=1)
@@ -78,28 +89,6 @@ def test_missing_inventory_file_reports_error(pytester):
     result.assert_outcomes(errors=1)
     assert str(missing.resolve()) in result.stdout.str()
     assert "--device-inventory 指向的清单文件不存在" in result.stdout.str()
-
-
-def test_private_data_dir_defaults_to_tmp_path(pytester):
-    """未提供 --device-private-data-dir 时 fixture 返回当前测试的 tmp_path。"""
-    pytester.makepyfile(
-        """
-        from pathlib import Path
-
-        def test_default(device_private_data_dir, tmp_path):
-            assert device_private_data_dir == tmp_path
-            assert isinstance(device_private_data_dir, Path)
-            assert device_private_data_dir.is_absolute()
-            assert device_private_data_dir.is_dir()
-
-        def test_isolated(device_private_data_dir, tmp_path):
-            assert device_private_data_dir == tmp_path
-        """
-    )
-
-    result = pytester.runpytest_subprocess("-q")
-
-    result.assert_outcomes(passed=2)
 
 
 def test_device_inventory_loads_hosts_and_group_vars(pytester, pytester_inventory):

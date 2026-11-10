@@ -1,4 +1,4 @@
-"""pytest fixtures：清单、工作目录与设备管理器。"""
+"""pytest fixtures：设备清单。"""
 
 from pathlib import Path
 
@@ -39,16 +39,3 @@ def device_inventory(device_inventory_path):
     loader = DataLoader()
     # InventoryManager 要求 sources 为字符串（内部做 `',' in source` 判断）。
     return InventoryManager(loader=loader, sources=[str(device_inventory_path)])
-
-
-@pytest.fixture
-def device_private_data_dir(tmp_path, request):
-    """ansible-runner 工作目录（绝对 ``Path``）。
-
-    未提供 ``--device-private-data-dir`` 时使用当前测试的 ``tmp_path``，
-    保证每个测试有独立目录且自动清理。
-    """
-    raw = request.config.getoption("--device-private-data-dir")
-    if not raw:
-        return tmp_path
-    return _resolve_path(raw, request.config.rootpath)

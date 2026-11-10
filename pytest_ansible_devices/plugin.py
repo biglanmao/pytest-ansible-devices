@@ -12,11 +12,7 @@ import sys
 import pytest
 
 # 导入即注册 fixture（pytest 会收集插件模块上的 fixture 属性）。
-from .fixture import (  # noqa: F401
-    device_inventory,
-    device_inventory_path,
-    device_private_data_dir,
-)
+from .fixture import device_inventory, device_inventory_path  # noqa: F401
 
 
 def pytest_addoption(parser):
@@ -26,12 +22,6 @@ def pytest_addoption(parser):
         action="store",
         default=None,
         help="清单文件路径（相对路径基于 pytest rootdir）",
-    )
-    group.addoption(
-        "--device-private-data-dir",
-        action="store",
-        default=None,
-        help="ansible-runner 工作目录（相对路径基于 pytest rootdir）；为空时每次执行使用临时目录",
     )
 
 
