@@ -1,8 +1,17 @@
-"""pytest fixtures：设备清单。"""
+"""pytest fixtures：设备清单与受管运行目录。"""
 
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
+
+from .run_directory import (
+    INDEX_FILE,
+    RETENTION_POLICIES,
+    new_session_id,
+    run_directory,
+    temporary_run_directory,
+)
 
 
 def _resolve_path(raw, rootdir: Path) -> Path:
@@ -24,6 +33,89 @@ def _inventory_source(config):
         return ini, "pytest 配置 device_inventory"
 
     return None, None
+
+
+def _option_source(config, option: str, ini_name: str):
+    """按 命令行 > pytest 配置 取值；都未配置时返回 ``(None, None)``。"""
+    cli = config.getoption(option)
+    if cli is not None and cli != "":
+        return cli, f"命令行 {option}"
+
+    ini = config.getini(ini_name)
+    if ini is not None and str(ini).strip() != "":
+        return ini, f"pytest 配置 {ini_name}"
+
+    return None, None
+
+
+def _mkdir_private(path: Path) -> None:
+    existed = path.exists()
+    path.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if existed:
+        return
+    try:
+        path.chmod(0o700)
+    except OSError:
+        pass
+
+
+def _session_id(config) -> str:
+    attr = "_pytest_ansible_devices_session_id"
+    session_id = getattr(config, attr, None)
+    if session_id is None:
+        session_id = new_session_id()
+        setattr(config, attr, session_id)
+    return session_id
+
+
+class _RunState:
+    """记录当前测试创建的受管运行目录，供 makereport 阶段收尾。"""
+
+    def __init__(self) -> None:
+        self._runs: dict[str, list] = {}
+        self._reports: dict[str, list] = {}
+
+    def register(self, nodeid: str, run) -> None:
+        self._runs.setdefault(nodeid, []).append(run)
+
+    def record_report(self, nodeid: str, report) -> None:
+        self._reports.setdefault(nodeid, []).append(report)
+
+    def finalize_node(self, nodeid: str) -> None:
+        runs = self._runs.pop(nodeid, [])
+        reports = self._reports.pop(nodeid, [])
+
+        if any(getattr(report, "failed", False) for report in reports):
+            outcome = "failed"
+        elif any(getattr(report, "skipped", False) for report in reports):
+            outcome = "skipped"
+        else:
+            outcome = "passed"
+
+        for run in runs:
+            if not run.finalized:
+                run.finalize(outcome)
+
+
+_RUN_STATE_ATTR = "_pytest_ansible_devices_run_state"
+
+
+def _run_state(config) -> _RunState:
+    state = getattr(config, _RUN_STATE_ATTR, None)
+    if state is None:
+        state = _RunState()
+        setattr(config, _RUN_STATE_ATTR, state)
+    return state
+
+
+def handle_test_report(config, nodeid: str, report) -> None:
+    """由 ``pytest_runtest_makereport`` 调用；teardown 阶段按用例结果收尾。"""
+    state = getattr(config, _RUN_STATE_ATTR, None)
+    if state is None:
+        return
+    state.record_report(nodeid, report)
+    if report.when == "teardown":
+        state.finalize_node(nodeid)
 
 
 @pytest.fixture(scope="session")
@@ -72,3 +164,141 @@ def device_runner_context():
     from .runner_context import runner_context
 
     return runner_context
+
+
+# ---------------------------------------------------------------- PAD-FR-21
+@pytest.fixture(scope="session")
+def device_run_root(request):
+    """``--device-run-dir`` / ``device_run_dir`` 指定的受管根目录。
+
+    未配置时返回 ``None``，不改变现有行为。
+    """
+    config = request.config
+    raw, source = _option_source(config, "--device-run-dir", "device_run_dir")
+    if raw is None:
+        return None
+
+    root = _resolve_path(raw, config.rootpath)
+    if root.exists() and not root.is_dir():
+        pytest.fail(f"运行目录不是目录: {root}（来源: {source}）")
+    try:
+        _mkdir_private(root)
+    except OSError as exc:
+        pytest.fail(f"无法创建运行目录: {root}（来源: {source}）: {exc}")
+    return root
+
+
+@pytest.fixture(scope="session")
+def device_session_dir(request, device_run_root):
+    """本次 session 的运行目录：``<run-root>/<session-id>/``。"""
+    if device_run_root is None:
+        return None
+    session_dir = device_run_root / _session_id(request.config)
+    _mkdir_private(session_dir)
+    return session_dir
+
+
+@pytest.fixture(scope="session")
+def device_run_retention(request):
+    """受管运行目录的默认保留策略：failed / all / none。"""
+    raw, source = _option_source(
+        request.config, "--device-run-retention", "device_run_retention"
+    )
+    if raw is None:
+        raw = "failed"
+    if raw not in RETENTION_POLICIES:
+        allowed = ", ".join(RETENTION_POLICIES)
+        pytest.fail(f"retention 必须是 {allowed} 之一（来源: {source}），实际为: {raw!r}")
+    return raw
+
+
+@pytest.fixture(scope="session")
+def device_verbosity(request):
+    """Ansible 原生 verbosity（0/1/2/...）；未配置时返回 None。"""
+    raw, source = _option_source(
+        request.config, "--device-verbosity", "device_verbosity"
+    )
+    if raw is None:
+        return None
+    try:
+        verbosity = int(raw)
+    except (TypeError, ValueError):
+        pytest.fail(f"verbosity 必须是整数（来源: {source}），实际为: {raw!r}")
+    if verbosity < 0:
+        pytest.fail(f"verbosity 不能为负数（来源: {source}），实际为: {verbosity}")
+    return verbosity
+
+
+@pytest.fixture(scope="session")
+def device_log_env(device_session_dir):
+    """session 级 ``ANSIBLE_LOG_PATH``；未配置受管目录时为空字典。"""
+    if device_session_dir is None:
+        return {}
+    return {"ANSIBLE_LOG_PATH": str(device_session_dir / "ansible.log")}
+
+
+# ---------------------------------------------------------------- PAD-FR-22
+@contextmanager
+def _registered(manager, state: _RunState, nodeid: str):
+    with manager as run:
+        state.register(nodeid, run)
+        yield run
+
+
+@pytest.fixture
+def device_run_dir(request, device_session_dir, device_run_retention, device_verbosity):
+    """返回运行目录工厂，可在同一用例内创建多个 run 目录。
+
+    用法::
+
+        def test_x(device_run_dir):
+            with device_run_dir("ssh-adhoc") as run:
+                ansible_runner.run(private_data_dir=run, envvars=run.envvars)
+                run.set_outcome(result)
+
+    未配置 ``--device-run-dir`` 时回退到 mkdtemp，退出即删除，行为与旧版一致。
+    """
+    config = request.config
+    nodeid = request.node.nodeid
+    state = _run_state(config)
+    default_retention = device_run_retention
+    default_verbosity = device_verbosity
+
+    def factory(label=None, *, retention=None, outcome=None, verbosity=None, root=None):
+        run_label = nodeid if not label else str(label)
+        selected_retention = retention or default_retention
+        if selected_retention not in RETENTION_POLICIES:
+            allowed = ", ".join(RETENTION_POLICIES)
+            raise ValueError(
+                f"retention 必须是 {allowed} 之一，实际为: {selected_retention!r}"
+            )
+        selected_verbosity = default_verbosity if verbosity is None else verbosity
+
+        if root is not None:
+            target_root = _resolve_path(root, config.rootpath)
+        else:
+            target_root = device_session_dir
+
+        if target_root is None:
+            manager = temporary_run_directory(
+                run_label,
+                retention=selected_retention,
+                outcome=outcome,
+                verbosity=selected_verbosity,
+                defer=False,
+            )
+        else:
+            manager = run_directory(
+                target_root,
+                run_label,
+                retention=selected_retention,
+                outcome=outcome,
+                verbosity=selected_verbosity,
+                nodeid=nodeid,
+                index_path=target_root / INDEX_FILE,
+                defer=True,
+            )
+
+        return _registered(manager, state, nodeid)
+
+    return factory

@@ -5,8 +5,9 @@
 
 本插件只消除**重复配置**，不封装执行与结果：
 
-- 提供 inventory 路径、runner 工作目录等 fixture；
+- 提供 inventory 路径、受管运行目录等 fixture；
 - 提供 `runner_context` 管理 `Runner` 生命周期；
+- 提供 `run_directory`（不依赖 pytest）管理运行目录、manifest 与保留策略；
 - 执行仍然直接调用 `ansible_runner.run`，结果仍然直接读 `runner.status / rc / events / stats`；
 - 不提供设备管理器、连接池、结果对象、playbook 目录等额外抽象。
 
@@ -35,8 +36,14 @@ pytest --help | grep -A3 'ansible-runner'
 |---|---|
 | `--device-inventory` | 清单源，**文件或目录**均可。相对路径以 pytest rootdir 为基准 |
 | `device_inventory`（pytest 配置） | 同上，作为命令行选项的兜底 |
+| `--device-run-dir` | 受管运行目录根。相对路径以 pytest rootdir 为基准；**不配置时不启用** |
+| `device_run_dir`（pytest 配置） | 同上，作为命令行选项的兜底 |
+| `--device-run-retention` | 受管目录保留策略：`failed`（默认）/ `all` / `none` |
+| `device_run_retention`（pytest 配置） | 同上，默认 `failed` |
+| `--device-verbosity` | Ansible 原生 verbosity 整数：`0` 摘要、`1` 增加 stdout/stderr、`2+` 任务参数与连接细节 |
+| `device_verbosity`（pytest 配置） | 同上，不配置时保持 Ansible 原生行为 |
 
-取值优先级：**命令行 > pytest 配置**。
+取值优先级：**命令行 > pytest 配置 > 不设置**。
 
 插件**不提供内置默认目录**：未配置时直接报错，并提示两种配置方式。
 目录形态要求存在且非空，否则报错并给出绝对路径与 rootdir。
@@ -90,6 +97,58 @@ def test_device_exists(device_inventory):
     assert host is not None
     assert host.vars.get("ansible_connection") in {"ssh", "local", None}
 ```
+
+### 受管运行目录（PAD-FR-21 / PAD-FR-22）
+
+以下 fixture 只在配置了 `--device-run-dir` / `device_run_dir` 后启用；未配置时全部为
+`None` / `{}`，不影响现有用例。
+
+| fixture | 级别 | 说明 |
+|---|---|---|
+| `device_run_root` | session | 配置的受管根目录（绝对 `Path`） |
+| `device_session_dir` | session | `<run-root>/<session-id>/`，本次 pytest session 的目录 |
+| `device_log_env` | session | `{"ANSIBLE_LOG_PATH": "<session-dir>/ansible.log"}` |
+| `device_verbosity` | session | 配置的 verbosity，未配置为 `None` |
+| `device_run_retention` | session | 默认保留策略，未配置为 `failed` |
+| `device_run_dir` | function | **工厂**：`with device_run_dir(label) as run:`，同一用例可创建多个 |
+
+`device_run_dir` 返回的 `run` 是 `os.PathLike`，`str(run)` / `run.path` 都是本次 run 的
+绝对目录，可直接作为 `private_data_dir`：
+
+```python
+import ansible_runner
+
+def test_adhoc(device_inventory_path, device_run_dir):
+    with device_run_dir("ssh-adhoc") as run:
+        result = ansible_runner.run(
+            private_data_dir=run,                 # 直接使用绝对路径
+            inventory=str(device_inventory_path),
+            host_pattern="vm_ubntu",
+            module="command",
+            module_args="hostname",
+            envvars=run.envvars,                  # ANSIBLE_LOG_PATH=<run>/ansible.log
+            verbosity=run.verbosity,              # 来自 --device-verbosity，或工厂参数覆盖
+        )
+        run.set_outcome(result)                   # 显式传入结果对象 / bool / "passed"
+```
+
+- 目录结构：`<run-root>/<session-id>/<label-slug>-<hash8>/<run_id>/`；
+- 每个 run 目录写 `.pad-run.json` manifest，并在 `<session-dir>/index.jsonl` 追加索引；
+- `run.envvars` 只包含 `ANSIBLE_LOG_PATH`；需要其他变量时自行合并；
+- `run.verbosity` 是调用 `ansible_runner.run(..., verbosity=...)` 的透传值，插件不解析日志；
+- 未调用 `set_outcome` 时，由 `pytest_runtest_makereport` 按用例结果收尾；
+- 未配置 `--device-run-dir` 时，工厂回退到 `mkdtemp`，退出即删除，行为与旧版一致。
+
+保留策略：
+
+| retention | 失败 run | 成功 run |
+|---|---|---|
+| `failed`（默认） | 保留 artifacts | 删除 artifacts，保留 manifest |
+| `all` | 保留 | 保留 |
+| `none` | 删除 artifacts，保留 manifest | 删除 artifacts，保留 manifest |
+
+> “保留 manifest”意味着仍可通过 label / nodeid 反查到目录；普通脚本可直接使用
+> `pytest_ansible_devices.find_run_dirs(root, label=...)`，无需 pytest。
 
 ### 执行前校验设备名（可选）
 
@@ -368,7 +427,9 @@ assert result.rc == 0 and result.status == "successful", failure_report(result)
 
 ## 7. 工作目录与清理策略
 
-插件不提供额外的 artifacts 配置，工作目录完全由现有机制控制：
+### 7.1 默认：pytest `tmp_path`
+
+不配置受管目录时，工作目录仍完全由 pytest 控制：
 
 | 需求 | 做法 |
 |---|---|
@@ -378,9 +439,6 @@ assert result.rc == 0 and result.status == "successful", failure_report(result)
 | 保留失败现场 | `tmp_path_retention_policy = failed` |
 | 成功后自动清理 | `tmp_path_retention_policy = none` |
 | `runner_context` 临时目录 | 未显式传 `private_data_dir` 时，退出 `with` 立即删除 |
-
-> 插件不提供 `--device-private-data-dir` 或 `device_private_data_dir` fixture：
-> 运行时目录由用例直接传给 `ansible_runner.run`，插件不再持有全局开关。
 
 `pytest.ini` 示例：
 
@@ -396,11 +454,34 @@ tmp_path_retention_count = 3
 
 > 当前环境（pytest 9.2）已验证这些选项可用；项目声明 `pytest>=7`，
 > 旧版本没有该 ini 选项时沿用默认保留策略。
->
-> 插件**不提供** `--device-artifacts-dir` / `--device-keep-artifacts`：
-> 目录保留与清理交给 pytest，插件不额外引入全局开关。
 
----
+### 7.2 可选：受管运行目录
+
+需要 session 结束后仍保留日志、且让 kw 层与用例共用同一套目录时，配置：
+
+```bash
+pytest --device-run-dir=build/runs --device-run-retention=failed --device-verbosity=1
+```
+
+或：
+
+```ini
+[pytest]
+device_run_dir = build/runs
+device_run_retention = failed
+device_verbosity = 1
+```
+
+行为：
+
+- `device_run_root` 是指定根目录；`device_session_dir` 自动追加 `<session-id>`；
+- `device_run_dir(label)` 在 session 目录下创建 `<label-slug>-<hash8>/<run_id>/`；
+- 日志通过 `run.envvars["ANSIBLE_LOG_PATH"]` 指向本 run 的 `ansible.log`；
+- 失败 run 默认保留 artifacts，成功 run 只保留 manifest；
+- 显式传 `private_data_dir=` 的调用不受影响，插件不拦截 `ansible_runner.run`。
+
+> 插件不提供 `--device-private-data-dir` 或 `device_private_data_dir` fixture：
+> 运行时目录由用例显式持有。受管目录只是可选的“目录来源”，不是全局开关。
 
 ## 8. 常见坑
 
@@ -420,9 +501,9 @@ tmp_path_retention_count = 3
 5. **playbook 目录由用例指定**
    插件没有 `--device-playbook-dir`，用 `project_dir=` 或 playbook 的绝对路径。
 
-6. **运行时目录用 `tmp_path`**
-   在用例里传 `private_data_dir=str(tmp_path)`；需要保留现场时用 §7 的
-   `tmp_path_retention_policy`，或显式传一个固定目录。
+6. **运行时目录用 `tmp_path` 或受管目录**
+   用例里可传 `private_data_dir=str(tmp_path)`；需要跨 session 保留日志时用 §7.2
+   的 `device_run_dir` 工厂。两者都不要在插件外另造全局目录开关。
 
 7. **不要在用例里临时写 inventory 模拟设备**
    设备信息只来自 `--device-inventory`，否则等于维护第二套设备真相。
@@ -436,6 +517,13 @@ tmp_path_retention_count = 3
 
 10. **目录清单的 `group_vars/` 必须放在目录内部**
     `-i .../inventory` 时只认 `.../inventory/group_vars/`，同级的 `group_vars/` 不生效。
+
+11. **受管运行目录的 outcome 要显式**
+    在 `with device_run_dir(...)` 里执行完 ansible 后调用 `run.set_outcome(result)`；
+    不调用时由 pytest 的用例结果决定，`retention=failed` 下未知结果按失败保留。
+
+12. **`ANSIBLE_LOG_PATH` 由使用方合并**
+    `run.envvars` 只提供日志路径；还需要其他环境变量时自行 `{**run.envvars, ...}`。
 
 ---
 
