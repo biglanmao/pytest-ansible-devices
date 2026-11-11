@@ -158,6 +158,7 @@ class RunDirectory(os.PathLike):
         retention: str,
         verbosity: int | None = None,
         log_filename: str = LOG_FILENAME,
+        log_path: Path | None = None,
         nodeid: str | None = None,
         index_path: Path | None = None,
         defer: bool = False,
@@ -169,6 +170,9 @@ class RunDirectory(os.PathLike):
         self.retention = _validate_retention(retention)
         self.verbosity = _validate_verbosity(verbosity)
         self.log_filename = log_filename
+        self._log_path = (
+            Path(log_path) if log_path is not None else self.path / log_filename
+        )
         self.nodeid = nodeid
         self.index_path = Path(index_path) if index_path is not None else None
         self.defer = defer
@@ -206,7 +210,7 @@ class RunDirectory(os.PathLike):
 
     @property
     def log_path(self) -> Path:
-        return self.path / self.log_filename
+        return self._log_path
 
     @property
     def artifact_dir(self) -> Path:
@@ -238,6 +242,7 @@ class RunDirectory(os.PathLike):
             "nodeid": self.nodeid,
             "run_id": self.run_id,
             "artifact_dir": str(self.artifact_dir),
+            "log_path": str(self.log_path),
             "path": str(self.path),
             "root": str(self.root),
             "retention": self.retention,
@@ -373,6 +378,7 @@ def run_directory(
     outcome: Any = None,
     verbosity: int | None = None,
     log_filename: str = LOG_FILENAME,
+    log_root: str | os.PathLike[str] | None = None,
     nodeid: str | None = None,
     index_path: str | os.PathLike[str] | None = None,
     defer: bool = False,
@@ -385,6 +391,7 @@ def run_directory(
     :param outcome: 显式 outcome；也可在上下文内调用 ``set_outcome``
     :param verbosity: Ansible 原生 verbosity 整数（0/1/2/...），仅携带不解析
     :param log_filename: ``ANSIBLE_LOG_PATH`` 的文件名，默认 ``ansible.log``
+    :param log_root: 独立日志根目录；不传时日志放在 run 目录内
     :param nodeid: 关联的 pytest nodeid（可选，写入 manifest）
     :param index_path: 索引文件路径，默认 ``<root>/index.jsonl``
     :param defer: 未显式设置 outcome 时保留 pending，交给外部收尾
@@ -404,6 +411,20 @@ def run_directory(
     _mkdir_private(label_dir)
     _mkdir_private(run_path)
 
+    if log_root is None:
+        resolved_log_path = None
+    else:
+        log_root_path = Path(log_root).expanduser().resolve()
+        if log_root_path.exists() and not log_root_path.is_dir():
+            raise NotADirectoryError(f"日志目录 root 不是目录: {log_root_path}")
+        # 独立日志目录按 session 传入的 root 再镜像 label/run 结构。
+        log_label_dir = log_root_path / label_dir.name
+        log_run_dir = log_label_dir / run_id
+        _mkdir_private(log_root_path)
+        _mkdir_private(log_label_dir)
+        _mkdir_private(log_run_dir)
+        resolved_log_path = log_run_dir / log_filename
+
     if index_path is None:
         resolved_index = root_path / INDEX_FILE
     else:
@@ -420,6 +441,7 @@ def run_directory(
         retention=retention,
         verbosity=verbosity,
         log_filename=log_filename,
+        log_path=resolved_log_path,
         nodeid=nodeid,
         index_path=resolved_index,
         defer=defer,
@@ -454,6 +476,7 @@ def temporary_run_directory(
     outcome: Any = None,
     verbosity: int | None = None,
     log_filename: str = LOG_FILENAME,
+    log_root: str | os.PathLike[str] | None = None,
     defer: bool = False,
 ):
     """未启用受管目录时的 mkdtemp 回退：退出后删除整个临时 root。"""
@@ -466,6 +489,7 @@ def temporary_run_directory(
             outcome=outcome,
             verbosity=verbosity,
             log_filename=log_filename,
+            log_root=log_root,
             defer=defer,
         ) as run:
             yield run
@@ -508,6 +532,7 @@ def find_run_dirs(
                 run_id=data.get("run_id", ""),
                 retention=data.get("retention", "failed"),
                 verbosity=data.get("verbosity"),
+                log_path=data.get("log_path"),
                 nodeid=data.get("nodeid"),
                 index_path=None,
             )

@@ -11,6 +11,7 @@ def test_new_options_are_registered(pytester):
     result.stdout.fnmatch_lines(
         [
             "*--device-run-dir*",
+            "*--device-log-dir*",
             "*--device-run-retention*",
             "*--device-verbosity*",
         ]
@@ -23,12 +24,14 @@ def test_unconfigured_fixtures_are_disabled(pytester):
         def test_disabled(
             device_run_root,
             device_session_dir,
+            device_log_root,
             device_log_env,
             device_run_retention,
             device_verbosity,
         ):
             assert device_run_root is None
             assert device_session_dir is None
+            assert device_log_root is None
             assert device_log_env == {}
             assert device_run_retention == "failed"
             assert device_verbosity is None
@@ -50,6 +53,7 @@ def test_factory_creates_managed_run(pytester, tmp_path):
         def test_managed(
             device_run_root,
             device_session_dir,
+            device_log_root,
             device_log_env,
             device_run_dir,
         ):
@@ -333,3 +337,78 @@ def test_run_root_must_be_directory(pytester, tmp_path):
 
     result.assert_outcomes(errors=1)
     assert "运行目录不是目录" in result.stdout.str()
+
+
+def test_independent_log_dir_option(
+    pytester, pytester_inventory, tmp_path
+):
+    run_root = tmp_path / "managed"
+    log_root = tmp_path / "logs"
+
+    pytester.makepyfile(
+        f"""
+        from pathlib import Path
+        import ansible_runner
+
+        def test_log(device_log_root, device_log_env, device_run_dir):
+            assert device_log_root == Path({str(log_root)!r}).resolve()
+            assert Path(device_log_env["ANSIBLE_LOG_PATH"]).is_relative_to(
+                device_log_root
+            )
+
+            with device_run_dir("op") as run:
+                assert run.log_path.is_relative_to(device_log_root)
+                assert run.path not in run.log_path.parents
+                assert run.envvars["ANSIBLE_LOG_PATH"] == str(run.log_path)
+
+                result = ansible_runner.run(
+                    private_data_dir=run,
+                    inventory={pytester_inventory!r},
+                    host_pattern="web1",
+                    module="ping",
+                    envvars=run.envvars,
+                    quiet=True,
+                )
+                assert result.status == "successful"
+                assert run.log_path.is_file()
+                run.set_outcome(result)
+
+            # 成功运行清理 artifacts，独立日志保留。
+            assert run.log_path.is_file()
+            assert not run.artifact_dir.exists()
+        """
+    )
+
+    result = pytester.runpytest_subprocess(
+        f"--device-run-dir={run_root}",
+        f"--device-log-dir={log_root}",
+        f"--device-inventory={pytester_inventory}",
+        "-q",
+    )
+
+    result.assert_outcomes(passed=1)
+
+
+def test_log_dir_can_be_configured_without_run_dir(pytester, tmp_path):
+    log_root = tmp_path / "logs"
+
+    pytester.makepyfile(
+        f"""
+        from pathlib import Path
+
+        def test_log(device_log_root, device_run_dir):
+            assert device_log_root == Path({str(log_root)!r}).resolve()
+            with device_run_dir("op") as run:
+                assert "pad_run_" in str(run.path)
+                assert run.log_path.is_relative_to(device_log_root)
+                run.log_path.write_text("log")
+                log_path = run.log_path
+            assert log_path.read_text() == "log"
+        """
+    )
+
+    result = pytester.runpytest_subprocess(
+        f"--device-log-dir={log_root}", "-q"
+    )
+
+    result.assert_outcomes(passed=1)
