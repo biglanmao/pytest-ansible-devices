@@ -157,6 +157,18 @@ def test_adhoc(device_inventory_path, device_run_dir):
 > “保留 manifest”意味着仍可通过 label / nodeid 反查到目录；普通脚本可直接使用
 > `pytest_ansible_devices.find_run_dirs(root, label=...)`，无需 pytest。
 
+清理时机：
+
+- 用例结束时只**写决策**（manifest 的 `action` 与 `cleanup=pending`），不删文件；
+- 真正删除在 `pytest_unconfigure` 执行，也就是所有报告（含 terminal summary、
+  junitxml）产出之后；
+- 清理失败只发 `RuntimeWarning` 并把 `cleanup` 记为 `failed`，**不会翻转用例结果**，
+  现场保留；
+- `manifest` 的 `cleanup` 字段取值：`skipped`（无需清理）/ `pending` / `done` / `failed`。
+
+库层（不走 pytest）默认仍是“退出即清理”；需要同样的延迟语义时传
+`run_directory(..., defer_cleanup=True)`，然后自行调用 `run.cleanup()`。
+
 ### 执行前校验设备名（可选）
 
 Ansible 对不存在的 `host_pattern` 只打 warning，`rc` 仍可能是 0，用例会假通过。
@@ -539,6 +551,7 @@ device_verbosity = 1
 13. **日志的清理边界**
     默认的 session 级日志写在 `<session-dir>/ansible.log`，插件**从不删除**，由调用方或 CI 负责；
     传 `envvars=run.envvars` 的 per-run 日志位于 run 目录内，会随 `retention` 清理一同删除。
+    清理本身延迟到 session 结束（`pytest_unconfigure`）执行，失败只告警、不影响用例结果。
 
 14. **收集 run 不要只扫一个 session 目录**
     xdist 下每个 worker 有自己的 `session-id`，一次 `-n 4` 就是 4 个 session 目录。

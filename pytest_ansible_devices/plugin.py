@@ -14,6 +14,7 @@ import pytest
 
 # 导入即注册 fixture（pytest 会收集插件模块上的 fixture 属性）。
 from .fixture import (  # noqa: F401
+    cleanup_pending_runs,
     configure_session_log,
     device_inventory,
     device_inventory_path,
@@ -105,6 +106,12 @@ def pytest_configure(config):
 def pytest_sessionstart(session):
     """在用例执行前固化 session id，并注入全局 ANSIBLE_LOG_PATH。"""
     configure_session_log(session.config)
+
+
+@pytest.hookimpl(trylast=True)
+def pytest_unconfigure(config):
+    """报告全部产出后统一执行 retention 清理；失败只告警，不影响退出码。"""
+    cleanup_pending_runs(config)
 
 
 @pytest.hookimpl(hookwrapper=True)

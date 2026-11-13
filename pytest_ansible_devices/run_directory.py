@@ -6,6 +6,8 @@
 - 目录结构为 ``<root>/<label-slug>-<hash8>/<run_id>/``；
 - 每个 run 目录写 manifest（同时作为删除标记），并在 root 下追加 JSONL 索引；
 - 退出时由调用方显式设置 outcome，按 retention 决定保留或清理；
+- 清理默认立即执行；``defer_cleanup=True`` 时只标记 ``cleanup=pending``，
+  由调用方择机调用 ``cleanup()``（pytest 插件在报告产出后统一执行）；
 - 只清理带 manifest 标记的目录，不跟随符号链接，不删除 root 本身。
 """
 
@@ -22,6 +24,7 @@ import shutil
 import tempfile
 from typing import Any
 import uuid
+import warnings
 
 RUN_MARKER = ".pad-run.json"
 INDEX_FILE = "index.jsonl"
@@ -159,6 +162,8 @@ class RunDirectory(os.PathLike):
         verbosity: int | None = None,
         log_filename: str = LOG_FILENAME,
         log_path: Path | None = None,
+        defer_cleanup: bool = False,
+        cleanup_state: str = "skipped",
         nodeid: str | None = None,
         index_path: Path | None = None,
         defer: bool = False,
@@ -176,11 +181,13 @@ class RunDirectory(os.PathLike):
         self.nodeid = nodeid
         self.index_path = Path(index_path) if index_path is not None else None
         self.defer = defer
+        self.defer_cleanup = defer_cleanup
 
         self.started_at = _utcnow()
         self._outcome: str | None = None
         self._finalized = False
         self._final_action: str | None = None
+        self._cleanup_state = cleanup_state
         self._manifest_path = self.path / RUN_MARKER
 
     # ------------------------------------------------------------------ path
@@ -207,6 +214,11 @@ class RunDirectory(os.PathLike):
     @property
     def final_action(self) -> str | None:
         return self._final_action
+
+    @property
+    def cleanup_state(self) -> str:
+        """清理执行状态：``skipped`` / ``pending`` / ``done`` / ``failed``。"""
+        return self._cleanup_state
 
     @property
     def log_path(self) -> Path:
@@ -255,10 +267,13 @@ class RunDirectory(os.PathLike):
             "started_at": self.started_at,
             "status": status,
             "action": action,
+            "cleanup": self._cleanup_state,
             "outcome": self._outcome,
             "updated_at": _utcnow(),
         }
+        self._atomic_write_manifest(data)
 
+    def _atomic_write_manifest(self, data: dict[str, Any]) -> None:
         tmp = self._manifest_path.with_name(f"{RUN_MARKER}.tmp")
         tmp.write_text(
             json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
@@ -268,6 +283,19 @@ class RunDirectory(os.PathLike):
         except OSError:
             pass
         os.replace(tmp, self._manifest_path)
+
+    def _persist_cleanup_state(self) -> None:
+        """只更新 manifest 的 cleanup / updated_at，保留其余字段（含 started_at）。"""
+        try:
+            data = json.loads(self._manifest_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return
+        data["cleanup"] = self._cleanup_state
+        data["updated_at"] = _utcnow()
+        try:
+            self._atomic_write_manifest(data)
+        except OSError:
+            pass
 
     def _append_index(self, event: str, action: str | None = None) -> None:
         if self.index_path is None:
@@ -294,6 +322,7 @@ class RunDirectory(os.PathLike):
 
     # ---------------------------------------------------------------- cleanup
     def _decide_action(self, outcome: str | None) -> str:
+        """只做决定：``keep`` 或 ``delete``（后者表示"应清理"）。"""
         if self.retention == "all":
             return "keep"
         if self.retention == "none":
@@ -334,7 +363,12 @@ class RunDirectory(os.PathLike):
                 os.unlink(entry.path)
 
     def finalize(self, outcome: Any = _UNSET) -> str:
-        """写入 manifest（先），再按 retention 清理（后）。返回 keep/delete。"""
+        """写 manifest 与索引，按 retention 决定 keep / delete。
+
+        ``defer_cleanup=True`` 时只把状态标为 ``pending``，实际删除由调用方
+        在合适时机调用 :meth:`cleanup`（pytest 插件在 session 结束时执行）。
+        这样清理不会参与用例结果，也不会早于报告产出。
+        """
         if self._finalized:
             return self._final_action or "keep"
 
@@ -345,15 +379,40 @@ class RunDirectory(os.PathLike):
             self._outcome = "unknown"
 
         action = self._decide_action(self._outcome)
+        self._cleanup_state = "pending" if action == "delete" else "skipped"
+
         # 顺序要求：先写 manifest / 索引，后删除。
         self._write_manifest(self._outcome, action)
         self._append_index("finished", action)
-        if action == "delete":
-            self._delete_children()
-
         self._finalized = True
         self._final_action = action
+
+        if action == "delete" and not self.defer_cleanup:
+            self.cleanup()
+
         return action
+
+    def cleanup(self) -> bool:
+        """执行 ``pending`` 状态的清理；幂等，失败只告警、不抛出。"""
+        if self._cleanup_state != "pending":
+            return self._cleanup_state in ("done", "skipped")
+
+        try:
+            self._delete_children()
+        except Exception as exc:  # noqa: BLE001 - 清理失败不得影响用例结果
+            self._cleanup_state = "failed"
+            self._persist_cleanup_state()
+            warnings.warn(
+                f"清理运行目录失败，已保留现场: {self.path}: {exc}",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            return False
+
+        self._cleanup_state = "done"
+        self._persist_cleanup_state()
+        self._append_index("cleaned", self._final_action)
+        return True
 
     # ------------------------------------------------------------ context mgr
     def __enter__(self) -> "RunDirectory":
@@ -383,6 +442,7 @@ def run_directory(
     outcome: Any = None,
     verbosity: int | None = None,
     log_filename: str = LOG_FILENAME,
+    defer_cleanup: bool = False,
     nodeid: str | None = None,
     index_path: str | os.PathLike[str] | None = None,
     defer: bool = False,
@@ -395,6 +455,8 @@ def run_directory(
     :param outcome: 显式 outcome；也可在上下文内调用 ``set_outcome``
     :param verbosity: Ansible 原生 verbosity 整数（0/1/2/...），仅携带不解析
     :param log_filename: ``ANSIBLE_LOG_PATH`` 的文件名，默认 ``ansible.log``
+    :param defer_cleanup: 只标记 ``cleanup=pending``，由调用方择机调用
+        ``run.cleanup()``；默认 False（退出时立即清理）
     :param nodeid: 关联的 pytest nodeid（可选，写入 manifest）
     :param index_path: 索引文件路径，默认 ``<root>/index.jsonl``
     :param defer: 未显式设置 outcome 时保留 pending，交给外部收尾
@@ -430,6 +492,7 @@ def run_directory(
         retention=retention,
         verbosity=verbosity,
         log_filename=log_filename,
+        defer_cleanup=defer_cleanup,
         nodeid=nodeid,
         index_path=resolved_index,
         defer=defer,
@@ -493,7 +556,8 @@ def find_run_dirs(
 
     递归扫描 ``root``，因此 xdist 下多个 ``<session-id>`` 目录能一次收齐。
     注意 manifest 会保留，但其中 ``log_path`` / ``artifact_dir`` 可能已被
-    ``retention`` 清理；读文件前先检查 ``outcome`` / ``action``。
+    ``retention`` 清理；读文件前先检查 ``cleanup``（``done`` 即已删除）
+    或 ``outcome`` / ``action``。
     """
     root_path = Path(root)
     found: list[RunDirectory] = []
@@ -524,6 +588,7 @@ def find_run_dirs(
                 retention=data.get("retention", "failed"),
                 verbosity=data.get("verbosity"),
                 log_path=data.get("log_path"),
+                cleanup_state=data.get("cleanup", "skipped"),
                 nodeid=data.get("nodeid"),
                 index_path=None,
             )

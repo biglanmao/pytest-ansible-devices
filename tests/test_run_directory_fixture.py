@@ -75,8 +75,10 @@ def test_factory_creates_managed_run(pytester, tmp_path):
                 (run.artifact_dir / "stdout").write_text("x")
                 run.set_outcome("passed")
 
+            # 清理延迟到 session 结束：块内仍能看到现场。
             assert (run.path / ".pad-run.json").is_file()
-            assert not run.artifact_dir.exists()
+            assert run.artifact_dir.exists()
+            assert run.cleanup_state == "pending"
         """
     )
 
@@ -85,6 +87,48 @@ def test_factory_creates_managed_run(pytester, tmp_path):
     )
 
     result.assert_outcomes(passed=1)
+
+    runs = find_run_dirs(run_root)
+    assert len(runs) == 1
+    manifest = json.loads((runs[0].path / RUN_MARKER).read_text(encoding="utf-8"))
+    assert manifest["action"] == "delete"
+    assert manifest["cleanup"] == "done"
+    assert not runs[0].artifact_dir.exists()
+
+
+def test_cleanup_runs_after_terminal_summary(pytester, tmp_path):
+    """清理必须晚于报告输出，否则汇总/归档插件读不到现场。"""
+    run_root = tmp_path / "managed"
+
+    pytester.makeconftest(
+        """
+        from pathlib import Path
+
+        def pytest_terminal_summary(terminalreporter):
+            root = terminalreporter.config.rootpath
+            run_path = Path((root / "run_path.txt").read_text())
+            assert (run_path / "artifacts").is_dir(), "清理不应早于报告输出"
+        """
+    )
+    pytester.makepyfile(
+        """
+        from pathlib import Path
+
+        def test_ok(device_run_dir, request):
+            with device_run_dir("op") as run:
+                run.artifact_dir.mkdir()
+                (run.artifact_dir / "stdout").write_text("x")
+                (request.config.rootpath / "run_path.txt").write_text(str(run.path))
+                run.set_outcome("passed")
+        """
+    )
+
+    result = pytester.runpytest_subprocess(f"--device-run-dir={run_root}", "-q")
+
+    result.assert_outcomes(passed=1)
+    runs = find_run_dirs(run_root)
+    assert len(runs) == 1
+    assert not runs[0].artifact_dir.exists()
 
 
 def test_failed_test_keeps_artifacts(pytester, tmp_path):
@@ -139,6 +183,7 @@ def test_passed_test_cleans_artifacts(pytester, tmp_path):
     )
     assert manifest["outcome"] == "passed"
     assert manifest["action"] == "delete"
+    assert manifest["cleanup"] == "done"
     assert not runs[0].artifact_dir.exists()
 
 

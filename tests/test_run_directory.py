@@ -96,6 +96,64 @@ def test_deferred_outcome(tmp_path):
     assert (run.path / RUN_MARKER).is_file()
 
 
+def test_deferred_cleanup_is_explicit_and_idempotent(tmp_path):
+    with run_directory(tmp_path / "runs", "op", defer_cleanup=True) as run:
+        artifact = _artifact(run)
+        run.set_outcome("passed")
+
+    # 决策已落盘，但现场保留到调用方执行 cleanup。
+    assert artifact.exists()
+    assert run.cleanup_state == "pending"
+    manifest = json.loads((run.path / RUN_MARKER).read_text(encoding="utf-8"))
+    assert manifest["action"] == "delete"
+    assert manifest["cleanup"] == "pending"
+
+    assert run.cleanup() is True
+    assert not artifact.exists()
+    manifest = json.loads((run.path / RUN_MARKER).read_text(encoding="utf-8"))
+    assert manifest["cleanup"] == "done"
+
+    # 幂等：再次调用不报错、不重复删除。
+    assert run.cleanup() is True
+
+
+def test_cleanup_failure_is_warned_not_raised(tmp_path, monkeypatch):
+    with run_directory(tmp_path / "runs", "op", defer_cleanup=True) as run:
+        artifact = _artifact(run)
+        run.set_outcome("passed")
+
+    def boom():
+        raise OSError("disk busy")
+
+    monkeypatch.setattr(run, "_delete_children", boom)
+    with pytest.warns(RuntimeWarning, match="清理运行目录失败"):
+        assert run.cleanup() is False
+
+    assert artifact.exists()
+    manifest = json.loads((run.path / RUN_MARKER).read_text(encoding="utf-8"))
+    assert manifest["cleanup"] == "failed"
+
+
+def test_cleanup_failure_during_finalize_does_not_raise(tmp_path, monkeypatch):
+    """eager 模式下清理失败也不能翻转调用方结果。"""
+    from pytest_ansible_devices.run_directory import RunDirectory
+
+    def boom(self):
+        raise RuntimeError("mock cleanup failure")
+
+    monkeypatch.setattr(RunDirectory, "_delete_children", boom)
+
+    with pytest.warns(RuntimeWarning, match="清理运行目录失败"):
+        with run_directory(tmp_path / "runs", "op") as run:
+            artifact = _artifact(run)
+            run.set_outcome("passed")
+
+    assert artifact.exists()
+    manifest = json.loads((run.path / RUN_MARKER).read_text(encoding="utf-8"))
+    assert manifest["action"] == "delete"
+    assert manifest["cleanup"] == "failed"
+
+
 def test_unknown_outcome_is_kept_by_failed_policy(tmp_path):
     with run_directory(tmp_path / "runs", "op") as run:
         artifact = _artifact(run)
@@ -128,9 +186,9 @@ def test_index_and_find_run_dirs(tmp_path):
         run_b.set_outcome("passed")
 
     index_lines = (root / INDEX_FILE).read_text(encoding="utf-8").splitlines()
-    assert len(index_lines) == 4
+    assert len(index_lines) == 5
     events = [json.loads(line)["event"] for line in index_lines]
-    assert events == ["created", "finished", "created", "finished"]
+    assert events == ["created", "finished", "created", "finished", "cleaned"]
 
     assert [run.path for run in find_run_dirs(root, label="op-a")] == [run_a.path]
     assert [run.path for run in find_run_dirs(root, nodeid="test_x.py::test_b")] == [

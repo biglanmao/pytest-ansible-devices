@@ -129,12 +129,20 @@ class _RunState:
     def __init__(self) -> None:
         self._runs: dict[str, list] = {}
         self._reports: dict[str, list] = {}
+        self._pending_cleanup: list = []
 
     def register(self, nodeid: str, run) -> None:
         self._runs.setdefault(nodeid, []).append(run)
 
     def record_report(self, nodeid: str, report) -> None:
         self._reports.setdefault(nodeid, []).append(report)
+
+    def register_cleanup(self, run) -> None:
+        """登记需要在 session 结束时统一清理的 run。"""
+        self._pending_cleanup.append(run)
+
+    def pending_cleanup(self) -> list:
+        return list(self._pending_cleanup)
 
     def finalize_node(self, nodeid: str) -> None:
         runs = self._runs.pop(nodeid, [])
@@ -150,6 +158,8 @@ class _RunState:
         for run in runs:
             if not run.finalized:
                 run.finalize(outcome)
+            if run.cleanup_state == "pending":
+                self.register_cleanup(run)
 
 
 _RUN_STATE_KEY: StashKey[_RunState] = StashKey()
@@ -167,6 +177,21 @@ def handle_test_report(config, nodeid: str, report) -> None:
     state.record_report(nodeid, report)
     if report.when == "teardown":
         state.finalize_node(nodeid)
+
+
+def cleanup_pending_runs(config) -> list:
+    """在 session 结束时执行所有 ``cleanup=pending`` 的清理。
+
+    清理失败只告警、不影响退出码；返回实际清理成功的 run 路径。
+    """
+    state = config.stash.get(_RUN_STATE_KEY, None)
+    if state is None:
+        return []
+    cleaned = []
+    for run in state.pending_cleanup():
+        if run.cleanup():
+            cleaned.append(run.path)
+    return cleaned
 
 
 @pytest.fixture(scope="session")
@@ -349,6 +374,7 @@ def device_run_dir(
                 retention=selected_retention,
                 outcome=outcome,
                 verbosity=selected_verbosity,
+                defer_cleanup=True,
                 nodeid=nodeid,
                 index_path=target_root / INDEX_FILE,
                 defer=True,
