@@ -14,6 +14,7 @@ import pytest
 
 # 导入即注册 fixture（pytest 会收集插件模块上的 fixture 属性）。
 from .fixture import (  # noqa: F401
+    configure_session_log,
     device_inventory,
     device_inventory_path,
     device_log_env,
@@ -112,6 +113,11 @@ def _ensure_ansible_path() -> None:
 
 def pytest_configure(config):
     _ensure_ansible_path()
+
+
+def pytest_sessionstart(session):
+    """在用例执行前固化 session id，并注入全局 ANSIBLE_LOG_PATH。"""
+    configure_session_log(session.config)
 
 
 @pytest.hookimpl(hookwrapper=True)

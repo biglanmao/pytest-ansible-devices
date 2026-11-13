@@ -1,6 +1,7 @@
 """pytest fixtures：设备清单与受管运行目录。"""
 
 from contextlib import contextmanager
+import os
 from pathlib import Path
 
 import pytest
@@ -65,6 +66,66 @@ _SESSION_ID_KEY: StashKey[str] = StashKey()
 
 def _session_id(config) -> str:
     return config.stash.setdefault(_SESSION_ID_KEY, new_session_id())
+
+
+def _worker_id(config) -> str | None:
+    """当前 xdist worker 的 id（如 ``gw0``）；控制器或非 xdist 下返回 None。"""
+    workerinput = getattr(config, "workerinput", None) or {}
+    return workerinput.get("workerid") or os.environ.get("PYTEST_XDIST_WORKER")
+
+
+def is_xdist_controller(config) -> bool:
+    """当前进程是否是 xdist 控制器（负责分发、不执行用例）。
+
+    判断依据与 xdist 自身一致：没有 ``workerinput``（不是 worker），
+    且 ``dist`` 未关闭。xdist 未安装时该选项不存在，返回 False。
+    """
+    if _worker_id(config) is not None:
+        return False
+    return getattr(config.option, "dist", None) not in (None, "no")
+
+
+def configure_session_log(config) -> str | None:
+    """在 session 启动时固化 session id，并按需注入全局 ``ANSIBLE_LOG_PATH``。
+
+    - session id 在这里首次生成，之后 ``device_session_dir`` 等夹具只读取，
+      因此 ``private_data_dir`` 与全局日志落在同一个 ``<session-id>`` 下；
+    - xdist 下每个 worker 独立一份日志：``<root>/<session-id>/<worker>/ansible.log``，
+      避免多进程并发写同一个文件；
+    - 控制器进程（``-n`` 下没有 workerinput）不跑用例，直接跳过；
+    - 已存在的 ``ANSIBLE_LOG_PATH`` 优先，不覆盖调用方环境。
+    """
+    _session_id(config)  # 唯一生成点：后续一律读取同一个值
+
+    if os.environ.get("ANSIBLE_LOG_PATH"):
+        return None
+
+    raw, _source = _option_source(config, "--device-log-dir", "device_log_dir")
+    if raw is None:
+        raw, _source = _option_source(config, "--device-run-dir", "device_run_dir")
+    if raw is None:
+        return None
+
+    worker = _worker_id(config)
+    if worker is None and is_xdist_controller(config):
+        return None  # 控制器不跑用例；一旦设值会被 worker 继承而破坏隔离
+
+    root = _resolve_path(raw, config.rootpath)
+    if root.exists() and not root.is_dir():
+        # 目录校验交给对应夹具，这里不抢先抛错打断整个 session。
+        return None
+
+    log_dir = root / _session_id(config)
+    if worker is not None:
+        log_dir = log_dir / worker
+    try:
+        _mkdir_private(log_dir)
+    except OSError:
+        return None  # 创建失败时保持原行为，由夹具侧给出明确报错
+
+    log_path = log_dir / "ansible.log"
+    os.environ["ANSIBLE_LOG_PATH"] = str(log_path)
+    return str(log_path)
 
 
 class _RunState:

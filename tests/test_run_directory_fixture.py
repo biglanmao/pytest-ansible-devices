@@ -2,6 +2,8 @@
 
 import json
 
+import pytest
+
 from pytest_ansible_devices.run_directory import RUN_MARKER, find_run_dirs
 
 
@@ -412,3 +414,112 @@ def test_log_dir_can_be_configured_without_run_dir(pytester, tmp_path):
     )
 
     result.assert_outcomes(passed=1)
+
+
+# ------------------------------------------------------ 全局 ANSIBLE_LOG_PATH
+def test_global_log_env_shares_session_id(pytester, tmp_path):
+    run_root = tmp_path / "managed"
+
+    pytester.makepyfile(
+        """
+        import os
+        from pathlib import Path
+
+        def test_global_log(device_session_dir):
+            log_path = Path(os.environ["ANSIBLE_LOG_PATH"])
+            assert log_path.name == "ansible.log"
+            assert log_path.parent.is_dir()
+            # 全局日志与 private_data_dir 共用同一个 session id。
+            assert log_path.parent == device_session_dir
+        """
+    )
+
+    result = pytester.runpytest_subprocess(f"--device-run-dir={run_root}", "-q")
+
+    result.assert_outcomes(passed=1)
+
+
+def test_global_log_env_from_log_dir(pytester, tmp_path):
+    log_root = tmp_path / "logs"
+
+    pytester.makepyfile(
+        """
+        import os
+        from pathlib import Path
+
+        def test_global_log(device_log_root, device_session_dir):
+            log_path = Path(os.environ["ANSIBLE_LOG_PATH"])
+            assert log_path.is_relative_to(device_log_root)
+            assert log_path.parent.parent == device_log_root
+        """
+    )
+
+    result = pytester.runpytest_subprocess(f"--device-log-dir={log_root}", "-q")
+
+    result.assert_outcomes(passed=1)
+
+
+def test_global_log_env_disabled_without_options(pytester):
+    pytester.makepyfile(
+        """
+        import os
+
+        def test_no_global_log():
+            assert "ANSIBLE_LOG_PATH" not in os.environ
+        """
+    )
+
+    result = pytester.runpytest_subprocess("-q")
+
+    result.assert_outcomes(passed=1)
+
+
+def test_global_log_env_respects_existing_env(pytester, tmp_path, monkeypatch):
+    existing = tmp_path / "user-ansible.log"
+    monkeypatch.setenv("ANSIBLE_LOG_PATH", str(existing))
+
+    pytester.makepyfile(
+        """
+        import os
+
+        def test_keep_user_log():
+            assert os.environ["ANSIBLE_LOG_PATH"].endswith("user-ansible.log")
+        """
+    )
+
+    result = pytester.runpytest_subprocess(
+        f"--device-run-dir={tmp_path / 'managed'}", "-q"
+    )
+
+    result.assert_outcomes(passed=1)
+
+
+def test_global_log_env_per_xdist_worker(pytester, tmp_path):
+    pytest.importorskip("xdist")
+    run_root = tmp_path / "managed"
+
+    pytester.makepyfile(
+        """
+        import os
+        from pathlib import Path
+
+        def check(device_session_dir):
+            log_path = Path(os.environ["ANSIBLE_LOG_PATH"])
+            assert log_path.parent.name == os.environ["PYTEST_XDIST_WORKER"]
+            assert log_path.parent.parent == device_session_dir
+
+        def test_worker_log_a(device_session_dir):
+            check(device_session_dir)
+
+        def test_worker_log_b(device_session_dir):
+            check(device_session_dir)
+        """
+    )
+
+    result = pytester.runpytest_subprocess(
+        f"--device-run-dir={run_root}", "-n", "2", "-q"
+    )
+
+    result.assert_outcomes(passed=2)
+    worker_dirs = sorted(p.name for p in run_root.glob("*/gw*") if p.is_dir())
+    assert worker_dirs == ["gw0", "gw1"]
