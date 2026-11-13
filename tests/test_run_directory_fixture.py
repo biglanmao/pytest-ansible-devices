@@ -13,28 +13,28 @@ def test_new_options_are_registered(pytester):
     result.stdout.fnmatch_lines(
         [
             "*--device-run-dir*",
-            "*--device-log-dir*",
             "*--device-run-retention*",
             "*--device-verbosity*",
         ]
     )
+    # 日志根目录已移除：日志要么在 session 目录，要么通过 envvars 细分到 run 目录。
+    assert "--device-log-dir" not in result.stdout.str()
 
 
 def test_unconfigured_fixtures_are_disabled(pytester):
     pytester.makepyfile(
         """
+        import os
+
         def test_disabled(
             device_run_root,
             device_session_dir,
-            device_log_root,
-            device_log_env,
             device_run_retention,
             device_verbosity,
         ):
             assert device_run_root is None
             assert device_session_dir is None
-            assert device_log_root is None
-            assert device_log_env == {}
+            assert "ANSIBLE_LOG_PATH" not in os.environ
             assert device_run_retention == "failed"
             assert device_verbosity is None
         """
@@ -50,18 +50,17 @@ def test_factory_creates_managed_run(pytester, tmp_path):
 
     pytester.makepyfile(
         f"""
+        import os
         from pathlib import Path
 
         def test_managed(
             device_run_root,
             device_session_dir,
-            device_log_root,
-            device_log_env,
             device_run_dir,
         ):
             assert device_run_root == Path({str(run_root)!r})
             assert device_session_dir.parent == device_run_root
-            assert Path(device_log_env["ANSIBLE_LOG_PATH"]) == (
+            assert Path(os.environ["ANSIBLE_LOG_PATH"]) == (
                 device_session_dir / "ansible.log"
             )
 
@@ -341,81 +340,6 @@ def test_run_root_must_be_directory(pytester, tmp_path):
     assert "运行目录不是目录" in result.stdout.str()
 
 
-def test_independent_log_dir_option(
-    pytester, pytester_inventory, tmp_path
-):
-    run_root = tmp_path / "managed"
-    log_root = tmp_path / "logs"
-
-    pytester.makepyfile(
-        f"""
-        from pathlib import Path
-        import ansible_runner
-
-        def test_log(device_log_root, device_log_env, device_run_dir):
-            assert device_log_root == Path({str(log_root)!r}).resolve()
-            assert Path(device_log_env["ANSIBLE_LOG_PATH"]).is_relative_to(
-                device_log_root
-            )
-
-            with device_run_dir("op") as run:
-                assert run.log_path.is_relative_to(device_log_root)
-                assert run.path not in run.log_path.parents
-                assert run.envvars["ANSIBLE_LOG_PATH"] == str(run.log_path)
-
-                result = ansible_runner.run(
-                    private_data_dir=run,
-                    inventory={pytester_inventory!r},
-                    host_pattern="web1",
-                    module="ping",
-                    envvars=run.envvars,
-                    quiet=True,
-                )
-                assert result.status == "successful"
-                assert run.log_path.is_file()
-                run.set_outcome(result)
-
-            # 成功运行清理 artifacts，独立日志保留。
-            assert run.log_path.is_file()
-            assert not run.artifact_dir.exists()
-        """
-    )
-
-    result = pytester.runpytest_subprocess(
-        f"--device-run-dir={run_root}",
-        f"--device-log-dir={log_root}",
-        f"--device-inventory={pytester_inventory}",
-        "-q",
-    )
-
-    result.assert_outcomes(passed=1)
-
-
-def test_log_dir_can_be_configured_without_run_dir(pytester, tmp_path):
-    log_root = tmp_path / "logs"
-
-    pytester.makepyfile(
-        f"""
-        from pathlib import Path
-
-        def test_log(device_log_root, device_run_dir):
-            assert device_log_root == Path({str(log_root)!r}).resolve()
-            with device_run_dir("op") as run:
-                assert "pad_run_" in str(run.path)
-                assert run.log_path.is_relative_to(device_log_root)
-                run.log_path.write_text("log")
-                log_path = run.log_path
-            assert log_path.read_text() == "log"
-        """
-    )
-
-    result = pytester.runpytest_subprocess(
-        f"--device-log-dir={log_root}", "-q"
-    )
-
-    result.assert_outcomes(passed=1)
-
-
 # ------------------------------------------------------ 全局 ANSIBLE_LOG_PATH
 def test_global_log_env_shares_session_id(pytester, tmp_path):
     run_root = tmp_path / "managed"
@@ -435,26 +359,6 @@ def test_global_log_env_shares_session_id(pytester, tmp_path):
     )
 
     result = pytester.runpytest_subprocess(f"--device-run-dir={run_root}", "-q")
-
-    result.assert_outcomes(passed=1)
-
-
-def test_global_log_env_from_log_dir(pytester, tmp_path):
-    log_root = tmp_path / "logs"
-
-    pytester.makepyfile(
-        """
-        import os
-        from pathlib import Path
-
-        def test_global_log(device_log_root, device_session_dir):
-            log_path = Path(os.environ["ANSIBLE_LOG_PATH"])
-            assert log_path.is_relative_to(device_log_root)
-            assert log_path.parent.parent == device_log_root
-        """
-    )
-
-    result = pytester.runpytest_subprocess(f"--device-log-dir={log_root}", "-q")
 
     result.assert_outcomes(passed=1)
 
@@ -495,6 +399,7 @@ def test_global_log_env_respects_existing_env(pytester, tmp_path, monkeypatch):
 
 
 def test_global_log_env_per_xdist_worker(pytester, tmp_path):
+    """每个 worker 有独立的 session 目录，全局日志直接落在各自 session 根下。"""
     pytest.importorskip("xdist")
     run_root = tmp_path / "managed"
 
@@ -505,8 +410,11 @@ def test_global_log_env_per_xdist_worker(pytester, tmp_path):
 
         def check(device_session_dir):
             log_path = Path(os.environ["ANSIBLE_LOG_PATH"])
-            assert log_path.parent.name == os.environ["PYTEST_XDIST_WORKER"]
-            assert log_path.parent.parent == device_session_dir
+            # 日志直接位于本 worker 的 session 目录下，不再有 gwN 子目录。
+            assert log_path.parent == device_session_dir
+            assert log_path.name == "ansible.log"
+            assert device_session_dir.parent.name != "gw0"
+            assert device_session_dir.parent.name != "gw1"
 
         def test_worker_log_a(device_session_dir):
             check(device_session_dir)
@@ -521,5 +429,8 @@ def test_global_log_env_per_xdist_worker(pytester, tmp_path):
     )
 
     result.assert_outcomes(passed=2)
-    worker_dirs = sorted(p.name for p in run_root.glob("*/gw*") if p.is_dir())
-    assert worker_dirs == ["gw0", "gw1"]
+
+    # 两个 worker 各自生成 session 目录（session id 含 pid），互不共用。
+    session_dirs = sorted(p for p in run_root.iterdir() if p.is_dir())
+    assert len(session_dirs) == 2
+    assert not list(run_root.glob("*/gw*"))

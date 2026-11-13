@@ -38,8 +38,6 @@ pytest --help | grep -A3 'ansible-runner'
 | `device_inventory`（pytest 配置） | 同上，作为命令行选项的兜底 |
 | `--device-run-dir` | 受管运行目录根。相对路径以 pytest rootdir 为基准；**不配置时不启用** |
 | `device_run_dir`（pytest 配置） | 同上，作为命令行选项的兜底 |
-| `--device-log-dir` | 独立 `ansible.log` 根目录；不配置时日志留在 run 目录内 |
-| `device_log_dir`（pytest 配置） | 同上，作为命令行选项的兜底 |
 | `--device-run-retention` | 受管目录保留策略：`failed`（默认）/ `all` / `none` |
 | `device_run_retention`（pytest 配置） | 同上，默认 `failed` |
 | `--device-verbosity` | Ansible 原生 verbosity 整数：`0` 摘要、`1` 增加 stdout/stderr、`2+` 任务参数与连接细节 |
@@ -102,14 +100,12 @@ def test_device_exists(device_inventory):
 
 ### 受管运行目录（PAD-FR-21 / PAD-FR-22）
 
-以下 fixture 按配置启用；未配置时为 `None` / `{}`，不影响现有用例。
+以下 fixture 按配置启用；未配置时为 `None`，不影响现有用例。
 
 | fixture | 级别 | 说明 |
 |---|---|---|
 | `device_run_root` | session | 配置的受管根目录（绝对 `Path`） |
 | `device_session_dir` | session | `<run-root>/<session-id>/`，本次 pytest session 的目录 |
-| `device_log_root` | session | 独立日志根目录（来自 `--device-log-dir`） |
-| `device_log_env` | session | 日志路径；配置日志目录时为 `<log-root>/<session-id>/ansible.log` |
 | `device_verbosity` | session | 配置的 verbosity，未配置为 `None` |
 | `device_run_retention` | session | 默认保留策略，未配置为 `failed` |
 | `device_run_dir` | function | **工厂**：`with device_run_dir(label) as run:`，同一用例可创建多个 |
@@ -128,16 +124,23 @@ def test_adhoc(device_inventory_path, device_run_dir):
             host_pattern="vm_ubntu",
             module="command",
             module_args="hostname",
-            envvars=run.envvars,                  # ANSIBLE_LOG_PATH：默认 <run>/ansible.log
+            envvars=run.envvars,                  # 可选：日志细分到 <run>/ansible.log
             verbosity=run.verbosity,              # 来自 --device-verbosity，或工厂参数覆盖
         )
         run.set_outcome(result)                   # 显式传入结果对象 / bool / "passed"
 ```
 
 - 目录结构：`<run-root>/<session-id>/<label-slug>-<hash8>/<run_id>/`；
+- `session-id` 是**进程级**的：xdist 下每个 worker 各自一份，所以 `-n 4` 会产生
+  4 个 session 目录和 4 份 `index.jsonl`；收集全部 run 请扫 `<run-root>`
+  （`find_run_dirs()`），不要只扫某一个 session 目录；
 - 每个 run 目录写 `.pad-run.json` manifest，并在 `<session-dir>/index.jsonl` 追加索引；
-- 默认 `ansible.log` 放在 run 目录内；配置 `--device-log-dir` 后改放到独立日志目录，
-  成功清理 artifacts 时不会删除日志；
+- 默认 `ansible.log` 写在 `<run-root>/<session-id>/ansible.log`，一个 worker 进程一份；
+- `run.log_path` / manifest 的 `log_path` 是 **per-run 日志路径**：只有传
+  `envvars=run.envvars` 时才是实际日志；默认模式的日志在 session 目录下；
+- 需要按 run 细分日志时传 `envvars=run.envvars`，日志改写到 `<run-dir>/ansible.log`，
+  并随 run 目录一起被 `retention` 清理（成功 run 默认只保留 manifest）；
+- 未配置 `--device-run-dir` 时既不启用受管目录，也不注入 `ANSIBLE_LOG_PATH`；
 - `run.envvars` 只包含 `ANSIBLE_LOG_PATH`；需要其他变量时自行合并；
 - `run.verbosity` 是调用 `ansible_runner.run(..., verbosity=...)` 的透传值，插件不解析日志；
 - 未调用 `set_outcome` 时，由 `pytest_runtest_makereport` 按用例结果收尾；
@@ -464,7 +467,7 @@ tmp_path_retention_count = 3
 需要 session 结束后仍保留日志、且让 kw 层与用例共用同一套目录时，配置：
 
 ```bash
-pytest --device-run-dir=build/runs --device-log-dir=build/logs \
+pytest --device-run-dir=build/runs \
        --device-run-retention=failed --device-verbosity=1
 ```
 
@@ -473,7 +476,6 @@ pytest --device-run-dir=build/runs --device-log-dir=build/logs \
 ```ini
 [pytest]
 device_run_dir = build/runs
-device_log_dir = build/logs
 device_run_retention = failed
 device_verbosity = 1
 ```
@@ -482,11 +484,11 @@ device_verbosity = 1
 
 - `device_run_root` 是指定根目录；`device_session_dir` 自动追加 `<session-id>`；
 - `device_run_dir(label)` 在 session 目录下创建 `<label-slug>-<hash8>/<run_id>/`；
-- 不配置 `device_log_dir` 时，`ansible.log` 留在 run 目录内；
-- 配置 `device_log_dir` 后，日志写到 `<log-root>/<session-id>/<label-dir>/<run_id>/ansible.log`；
-- `run.log_path` / `run.envvars["ANSIBLE_LOG_PATH"]` 始终指向实际日志文件；
+- 默认 `ansible.log` 写在 `<run-root>/<session-id>/ansible.log`（每个 worker 进程一份）；
+- 传 `envvars=run.envvars` 时日志改写到 `<run-dir>/ansible.log`，随 run 目录一起清理；
+- `run.log_path` / `run.envvars["ANSIBLE_LOG_PATH"]` 指向 per-run 日志（仅在显式传入 `envvars` 时生效）；
 - 失败 run 默认保留 artifacts，成功 run 只保留 manifest；
-- **独立日志目录不参与 run 目录清理**，日志可长期保留或单独轮转；
+- **session 级日志不参与 `retention` 清理**，由调用方或 CI 负责保留与轮转；
 - 显式传 `private_data_dir=` 的调用不受影响，插件不拦截 `ansible_runner.run`。
 
 > 插件不提供 `--device-private-data-dir` 或 `device_private_data_dir` fixture：
@@ -534,9 +536,15 @@ device_verbosity = 1
 12. **`ANSIBLE_LOG_PATH` 由使用方合并**
     `run.envvars` 只提供日志路径；还需要其他环境变量时自行 `{**run.envvars, ...}`。
 
-13. **日志和 artifacts 的清理是分开的**
-    默认日志在 run 目录内，会随成功清理一起删除；需要保留日志就配置
-    `--device-log-dir`，独立日志不参与 `retention` 清理。
+13. **日志的清理边界**
+    默认的 session 级日志写在 `<session-dir>/ansible.log`，插件**从不删除**，由调用方或 CI 负责；
+    传 `envvars=run.envvars` 的 per-run 日志位于 run 目录内，会随 `retention` 清理一同删除。
+
+14. **收集 run 不要只扫一个 session 目录**
+    xdist 下每个 worker 有自己的 `session-id`，一次 `-n 4` 就是 4 个 session 目录。
+    用 `find_run_dirs(<run-root>)` 递归扫 manifest；另外 manifest 里的
+    `log_path` / `artifact_dir` 可能已被 `retention` 删掉（成功 run 只留 manifest），
+    读文件前先看 `outcome` / `action`。
 
 ---
 

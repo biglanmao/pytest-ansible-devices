@@ -210,6 +210,11 @@ class RunDirectory(os.PathLike):
 
     @property
     def log_path(self) -> Path:
+        """per-run 日志路径（``<run>/ansible.log``）。
+
+        只有在调用 ``ansible_runner.run(..., envvars=run.envvars)`` 时才是实际日志；
+        默认行为下日志写在 ``<run-root>/<session-id>/ansible.log``，此路径不落盘。
+        """
         return self._log_path
 
     @property
@@ -218,7 +223,7 @@ class RunDirectory(os.PathLike):
 
     @property
     def envvars(self) -> dict[str, str]:
-        """runner 需要的环境变量：本 run 的 ``ANSIBLE_LOG_PATH``。"""
+        """开启 per-run 日志：让本 run 的 ``ANSIBLE_LOG_PATH`` 指向 ``log_path``。"""
         return {"ANSIBLE_LOG_PATH": str(self.log_path)}
 
     @property
@@ -378,7 +383,6 @@ def run_directory(
     outcome: Any = None,
     verbosity: int | None = None,
     log_filename: str = LOG_FILENAME,
-    log_root: str | os.PathLike[str] | None = None,
     nodeid: str | None = None,
     index_path: str | os.PathLike[str] | None = None,
     defer: bool = False,
@@ -391,7 +395,6 @@ def run_directory(
     :param outcome: 显式 outcome；也可在上下文内调用 ``set_outcome``
     :param verbosity: Ansible 原生 verbosity 整数（0/1/2/...），仅携带不解析
     :param log_filename: ``ANSIBLE_LOG_PATH`` 的文件名，默认 ``ansible.log``
-    :param log_root: 独立日志根目录；不传时日志放在 run 目录内
     :param nodeid: 关联的 pytest nodeid（可选，写入 manifest）
     :param index_path: 索引文件路径，默认 ``<root>/index.jsonl``
     :param defer: 未显式设置 outcome 时保留 pending，交给外部收尾
@@ -411,20 +414,6 @@ def run_directory(
     _mkdir_private(label_dir)
     _mkdir_private(run_path)
 
-    if log_root is None:
-        resolved_log_path = None
-    else:
-        log_root_path = Path(log_root).expanduser().resolve()
-        if log_root_path.exists() and not log_root_path.is_dir():
-            raise NotADirectoryError(f"日志目录 root 不是目录: {log_root_path}")
-        # 独立日志目录按 session 传入的 root 再镜像 label/run 结构。
-        log_label_dir = log_root_path / label_dir.name
-        log_run_dir = log_label_dir / run_id
-        _mkdir_private(log_root_path)
-        _mkdir_private(log_label_dir)
-        _mkdir_private(log_run_dir)
-        resolved_log_path = log_run_dir / log_filename
-
     if index_path is None:
         resolved_index = root_path / INDEX_FILE
     else:
@@ -441,7 +430,6 @@ def run_directory(
         retention=retention,
         verbosity=verbosity,
         log_filename=log_filename,
-        log_path=resolved_log_path,
         nodeid=nodeid,
         index_path=resolved_index,
         defer=defer,
@@ -476,7 +464,6 @@ def temporary_run_directory(
     outcome: Any = None,
     verbosity: int | None = None,
     log_filename: str = LOG_FILENAME,
-    log_root: str | os.PathLike[str] | None = None,
     defer: bool = False,
 ):
     """未启用受管目录时的 mkdtemp 回退：退出后删除整个临时 root。"""
@@ -489,7 +476,6 @@ def temporary_run_directory(
             outcome=outcome,
             verbosity=verbosity,
             log_filename=log_filename,
-            log_root=log_root,
             defer=defer,
         ) as run:
             yield run
@@ -503,7 +489,12 @@ def find_run_dirs(
     label: str | None = None,
     nodeid: str | None = None,
 ) -> list[RunDirectory]:
-    """按 manifest 反查运行目录；不跟随符号链接。"""
+    """按 manifest 反查运行目录；不跟随符号链接。
+
+    递归扫描 ``root``，因此 xdist 下多个 ``<session-id>`` 目录能一次收齐。
+    注意 manifest 会保留，但其中 ``log_path`` / ``artifact_dir`` 可能已被
+    ``retention`` 清理；读文件前先检查 ``outcome`` / ``action``。
+    """
     root_path = Path(root)
     found: list[RunDirectory] = []
     if not root_path.is_dir():

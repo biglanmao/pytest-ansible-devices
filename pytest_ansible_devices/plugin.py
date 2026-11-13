@@ -17,8 +17,6 @@ from .fixture import (  # noqa: F401
     configure_session_log,
     device_inventory,
     device_inventory_path,
-    device_log_env,
-    device_log_root,
     device_run_dir,
     device_run_retention,
     device_run_root,
@@ -57,12 +55,6 @@ def pytest_addoption(parser):
         help="受管运行目录根（相对路径基于 pytest rootdir）；未配置时不启用",
     )
     group.addoption(
-        "--device-log-dir",
-        action="store",
-        default=None,
-        help="独立 ansible.log 根目录（相对路径基于 pytest rootdir）；未配置时日志留在 run 目录",
-    )
-    group.addoption(
         "--device-run-retention",
         action="store",
         choices=RETENTION_POLICIES,
@@ -85,11 +77,6 @@ def pytest_addoption(parser):
     parser.addini(
         "device_run_dir",
         "受管运行目录根；相对路径基于 pytest rootdir；不配置时不启用",
-        default="",
-    )
-    parser.addini(
-        "device_log_dir",
-        "独立 ansible.log 根目录；相对路径基于 pytest rootdir；不配置时日志留在 run 目录",
         default="",
     )
     parser.addini(

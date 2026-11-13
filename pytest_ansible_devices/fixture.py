@@ -90,8 +90,8 @@ def configure_session_log(config) -> str | None:
 
     - session id 在这里首次生成，之后 ``device_session_dir`` 等夹具只读取，
       因此 ``private_data_dir`` 与全局日志落在同一个 ``<session-id>`` 下；
-    - xdist 下每个 worker 独立一份日志：``<root>/<session-id>/<worker>/ansible.log``，
-      避免多进程并发写同一个文件；
+    - session id 由 ``new_session_id`` 生成（含 pid），每个 worker 进程各有一份，
+      因此全局日志天然是"每 worker 一个文件"，不需要再加 worker 子目录；
     - 控制器进程（``-n`` 下没有 workerinput）不跑用例，直接跳过；
     - 已存在的 ``ANSIBLE_LOG_PATH`` 优先，不覆盖调用方环境。
     """
@@ -100,14 +100,11 @@ def configure_session_log(config) -> str | None:
     if os.environ.get("ANSIBLE_LOG_PATH"):
         return None
 
-    raw, _source = _option_source(config, "--device-log-dir", "device_log_dir")
-    if raw is None:
-        raw, _source = _option_source(config, "--device-run-dir", "device_run_dir")
+    raw, _source = _option_source(config, "--device-run-dir", "device_run_dir")
     if raw is None:
         return None
 
-    worker = _worker_id(config)
-    if worker is None and is_xdist_controller(config):
+    if _worker_id(config) is None and is_xdist_controller(config):
         return None  # 控制器不跑用例；一旦设值会被 worker 继承而破坏隔离
 
     root = _resolve_path(raw, config.rootpath)
@@ -116,8 +113,6 @@ def configure_session_log(config) -> str | None:
         return None
 
     log_dir = root / _session_id(config)
-    if worker is not None:
-        log_dir = log_dir / worker
     try:
         _mkdir_private(log_dir)
     except OSError:
@@ -245,27 +240,6 @@ def device_run_root(request):
 
 
 @pytest.fixture(scope="session")
-def device_log_root(request):
-    """``--device-log-dir`` / ``device_log_dir`` 指定的独立日志根目录。
-
-    未配置时返回 ``None``；此时日志仍放在 run 目录内（保持旧行为）。
-    """
-    config = request.config
-    raw, source = _option_source(config, "--device-log-dir", "device_log_dir")
-    if raw is None:
-        return None
-
-    root = _resolve_path(raw, config.rootpath)
-    if root.exists() and not root.is_dir():
-        pytest.fail(f"日志目录不是目录: {root}（来源: {source}）")
-    try:
-        _mkdir_private(root)
-    except OSError as exc:
-        pytest.fail(f"无法创建日志目录: {root}（来源: {source}）: {exc}")
-    return root
-
-
-@pytest.fixture(scope="session")
 def device_session_dir(request, device_run_root):
     """本次 session 的运行目录：``<run-root>/<session-id>/``。"""
     if device_run_root is None:
@@ -306,24 +280,6 @@ def device_verbosity(request):
     return verbosity
 
 
-@pytest.fixture(scope="session")
-def device_log_env(request, device_session_dir, device_log_root):
-    """session 级 ``ANSIBLE_LOG_PATH``；未配置目录时为空字典。
-
-    配置了 ``--device-log-dir`` 时日志完全独立于运行目录；
-    否则沿用旧的 ``<session-dir>/ansible.log``。
-    """
-    if device_log_root is not None:
-        log_dir = device_log_root / _session_id(request.config)
-    else:
-        log_dir = device_session_dir
-
-    if log_dir is None:
-        return {}
-    _mkdir_private(log_dir)
-    return {"ANSIBLE_LOG_PATH": str(log_dir / "ansible.log")}
-
-
 # ---------------------------------------------------------------- PAD-FR-22
 @contextmanager
 def _registered(manager, state: _RunState, nodeid: str):
@@ -338,7 +294,6 @@ def device_run_dir(
     device_session_dir,
     device_run_retention,
     device_verbosity,
-    device_log_root,
 ):
     """返回运行目录工厂，可在同一用例内创建多个 run 目录。
 
@@ -356,10 +311,6 @@ def device_run_dir(
     state = _run_state(config)
     default_retention = device_run_retention
     default_verbosity = device_verbosity
-    session_id = _session_id(config)
-    default_log_root = (
-        None if device_log_root is None else device_log_root / session_id
-    )
 
     def factory(
         label=None,
@@ -368,7 +319,6 @@ def device_run_dir(
         outcome=None,
         verbosity=None,
         root=None,
-        log_root=None,
     ):
         run_label = nodeid if not label else str(label)
         selected_retention = retention or default_retention
@@ -384,18 +334,12 @@ def device_run_dir(
         else:
             target_root = device_session_dir
 
-        if log_root is not None:
-            selected_log_root = _resolve_path(log_root, config.rootpath)
-        else:
-            selected_log_root = default_log_root
-
         if target_root is None:
             manager = temporary_run_directory(
                 run_label,
                 retention=selected_retention,
                 outcome=outcome,
                 verbosity=selected_verbosity,
-                log_root=selected_log_root,
                 defer=False,
             )
         else:
@@ -405,7 +349,6 @@ def device_run_dir(
                 retention=selected_retention,
                 outcome=outcome,
                 verbosity=selected_verbosity,
-                log_root=selected_log_root,
                 nodeid=nodeid,
                 index_path=target_root / INDEX_FILE,
                 defer=True,

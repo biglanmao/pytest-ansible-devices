@@ -191,31 +191,11 @@ def test_invalid_retention_and_verbosity(tmp_path):
             pass
 
 
-def test_independent_log_root(tmp_path):
-    log_root = tmp_path / "logs"
+def test_temporary_run_directory_removes_everything(tmp_path):
+    """临时回退模式下 run 目录整体删除，日志也随之一并清理。"""
 
-    with run_directory(tmp_path / "runs", "op", log_root=log_root) as run:
-        assert run.log_path.is_relative_to(log_root.resolve())
-        assert run.path not in run.log_path.parents
-        assert run.envvars["ANSIBLE_LOG_PATH"] == str(run.log_path)
-        assert run.manifest["log_path"] == str(run.log_path)
-
+    with temporary_run_directory("op") as run:
         run.log_path.write_text("log", encoding="utf-8")
-        artifact = _artifact(run)
-        run.set_outcome("passed")
-
-    # 成功运行清理 artifacts，但独立日志保留。
-    assert not artifact.exists()
-    assert run.log_path.read_text(encoding="utf-8") == "log"
-
-
-def test_temporary_run_directory_keeps_independent_log(tmp_path):
-    log_root = tmp_path / "logs"
-
-    with temporary_run_directory("op", log_root=log_root) as run:
-        run.log_path.write_text("log", encoding="utf-8")
-        log_path = run.log_path
         run_path = run.path
 
     assert not run_path.exists()
-    assert log_path.read_text(encoding="utf-8") == "log"
