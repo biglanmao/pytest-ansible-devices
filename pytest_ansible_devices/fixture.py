@@ -4,6 +4,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
+from _pytest.stash import StashKey
 
 from .run_directory import (
     INDEX_FILE,
@@ -59,13 +60,11 @@ def _mkdir_private(path: Path) -> None:
         pass
 
 
+_SESSION_ID_KEY: StashKey[str] = StashKey()
+
+
 def _session_id(config) -> str:
-    attr = "_pytest_ansible_devices_session_id"
-    session_id = getattr(config, attr, None)
-    if session_id is None:
-        session_id = new_session_id()
-        setattr(config, attr, session_id)
-    return session_id
+    return config.stash.setdefault(_SESSION_ID_KEY, new_session_id())
 
 
 class _RunState:
@@ -97,20 +96,16 @@ class _RunState:
                 run.finalize(outcome)
 
 
-_RUN_STATE_ATTR = "_pytest_ansible_devices_run_state"
+_RUN_STATE_KEY: StashKey[_RunState] = StashKey()
 
 
 def _run_state(config) -> _RunState:
-    state = getattr(config, _RUN_STATE_ATTR, None)
-    if state is None:
-        state = _RunState()
-        setattr(config, _RUN_STATE_ATTR, state)
-    return state
+    return config.stash.setdefault(_RUN_STATE_KEY, _RunState())
 
 
 def handle_test_report(config, nodeid: str, report) -> None:
     """由 ``pytest_runtest_makereport`` 调用；teardown 阶段按用例结果收尾。"""
-    state = getattr(config, _RUN_STATE_ATTR, None)
+    state = config.stash.get(_RUN_STATE_KEY, None)
     if state is None:
         return
     state.record_report(nodeid, report)
