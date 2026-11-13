@@ -1,6 +1,6 @@
 # pytest-ansible-devices 使用说明
 
-> 适用版本：0.1.0
+> 适用版本：0.2.0
 > 依赖：`pytest>=7`、`ansible-core>=2.16`、`ansible-runner>=2.4`
 
 本插件只消除**重复配置**，不封装执行与结果：
@@ -549,6 +549,18 @@ device_verbosity = 1
 ---
 
 ## 9. 兼容性说明
+
+### 0.2.0（日志模型收敛，破坏性）
+
+- 删除 `--device-log-dir` 选项与 `device_log_dir` 配置项；
+- 删除 `device_log_env`、`device_log_root` fixture；
+- 删除 `run_directory(log_root=...)` / `temporary_run_directory(log_root=...)` 参数；
+- 默认日志改为 `<run-root>/<session-id>/ansible.log`，移除 `gwN` 子目录；
+- 迁移：需要独立日志目录时，直接在用例里传
+  `envvars={"ANSIBLE_LOG_PATH": "<自定义路径>"}`；需要按 run 细分时用
+  `envvars=run.envvars`。
+
+### 更早的变更
 
 - fixture 返回值已统一为绝对 `Path`（旧版本是字符串）：
   - `str(device_inventory_path)`、`Path(device_inventory_path)` 都可用；
